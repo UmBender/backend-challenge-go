@@ -5,50 +5,50 @@ MIGRATE  = $(COMPOSE) run --rm migrate -path=/migrations \
 .PHONY: help up down down-volumes ps logs migrate-up migrate-down migrate-version \
 	fmt fmt-check vet test test-race test-integration check
 
-help:
+help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
 
-up:
+up: ## Build and start everything in the background
 	$(COMPOSE) up --build -d
 
-down:
+down: ## Stop containers, keep the database volume
 	$(COMPOSE) down
 
-down-volumes:
+down-volumes: ## Stop containers and delete the database volume (re-runs initdb)
 	$(COMPOSE) down -v
 
-ps:
+ps: ## Show container and health status
 	$(COMPOSE) ps
 
-logs:
+logs: ## Follow logs of the three wallet replicas
 	$(COMPOSE) logs -f wallet-1 wallet-2 wallet-3
 
-migrate-up:
+migrate-up: ## Apply all pending migrations
 	$(MIGRATE) up
 
-migrate-down:
+migrate-down: ## Revert the most recent migration
 	$(MIGRATE) down 1
 
-migrate-version:
+migrate-version: ## Print the current migration version
 	$(MIGRATE) version
 
-fmt:
+fmt: ## Format all Go code
 	gofmt -w .
 
-fmt-check:
+fmt-check: ## Fail if any Go file is not gofmt-formatted
 	@test -z "$$(gofmt -l .)" || (gofmt -l . && echo "run: make fmt" && exit 1)
 
-vet:
+vet: ## go vet
 	go vet ./...
 	go vet -tags=integration ./...
 
-test:
+test: ## Unit tests (no Docker needed)
 	go test ./...
 
-test-race:
+test-race: ## Unit tests with the race detector
 	go test -race ./...
 
-test-integration:
+test-integration: ## Integration tests; needs `make up` (or the infra services) running
 	go test -tags=integration -race -count=1 ./...
 
-check: fmt-check vet test-race
+check: fmt-check vet test-race ## Everything that runs without Docker
