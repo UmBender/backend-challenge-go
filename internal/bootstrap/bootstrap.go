@@ -3,8 +3,11 @@ package bootstrap
 import (
 	"go.uber.org/fx"
 
+	"github.com/UmBender/backend-challenge-go/internal/adapters/httpapi"
 	"github.com/UmBender/backend-challenge-go/internal/platform/config"
+	"github.com/UmBender/backend-challenge-go/internal/platform/health"
 	"github.com/UmBender/backend-challenge-go/internal/platform/logging"
+	"github.com/UmBender/backend-challenge-go/internal/platform/metrics"
 )
 
 // Modules is the full application graph, without process-level options.
@@ -12,6 +15,9 @@ func Modules() fx.Option {
 	return fx.Options(
 		config.Module,
 		logging.Module,
+		metrics.Module,
+		health.Module,
+		httpapi.Module,
 	)
 }
 
