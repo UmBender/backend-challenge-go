@@ -17,6 +17,13 @@ var (
 	ErrOverflow      = errors.New("money: amount out of range")
 )
 
+// Programming errors, not bad input: the domain rejects a currency mismatch
+// between request and wallet before it reaches Money.
+var (
+	ErrCurrencyMismatch = errors.New("money: currency mismatch")
+	ErrZeroValue        = errors.New("money: uninitialized value")
+)
+
 const scale = 2
 
 // Spelled out so this package does not import "math".
@@ -128,4 +135,73 @@ func formatMinor(v int64) string {
 	b = strconv.AppendUint(b, u/100, 10)
 	b = append(b, '.', byte('0'+frac/10), byte('0'+frac%10))
 	return string(b)
+}
+
+func Zero(cur Currency) (Money, error) { return FromMinor(0, cur) }
+
+func (m Money) IsValid() bool { return !m.currency.IsZero() }
+
+// These cannot return an error, so they answer false for Money{}: a guard
+// such as `if !amount.IsPositive()` rejects the invalid value.
+func (m Money) IsZero() bool     { return m.IsValid() && m.minor == 0 }
+func (m Money) IsNegative() bool { return m.IsValid() && m.minor < 0 }
+func (m Money) IsPositive() bool { return m.IsValid() && m.minor > 0 }
+
+func (m Money) Add(o Money) (Money, error) {
+	if err := m.compatible(o); err != nil {
+		return Money{}, err
+	}
+	// Go integers wrap silently, so overflow is checked before adding.
+	if (o.minor > 0 && m.minor > maxInt64-o.minor) || (o.minor < 0 && m.minor < minInt64-o.minor) {
+		return Money{}, fmt.Errorf("%w: %s + %s", ErrOverflow, m, o)
+	}
+	return Money{minor: m.minor + o.minor, currency: m.currency}, nil
+}
+
+// Sub is checked directly instead of Add(o.Neg()), which would wrongly
+// refuse m - MinInt64 for representable results.
+func (m Money) Sub(o Money) (Money, error) {
+	if err := m.compatible(o); err != nil {
+		return Money{}, err
+	}
+	if (o.minor < 0 && m.minor > maxInt64+o.minor) || (o.minor > 0 && m.minor < minInt64+o.minor) {
+		return Money{}, fmt.Errorf("%w: %s - %s", ErrOverflow, m, o)
+	}
+	return Money{minor: m.minor - o.minor, currency: m.currency}, nil
+}
+
+// Neg reports overflow for MinInt64, which has no positive counterpart.
+func (m Money) Neg() (Money, error) {
+	if !m.IsValid() {
+		return Money{}, ErrZeroValue
+	}
+	if m.minor == minInt64 {
+		return Money{}, fmt.Errorf("%w: -(%s)", ErrOverflow, m)
+	}
+	return Money{minor: -m.minor, currency: m.currency}, nil
+}
+
+// Cmp returns -1, 0 or +1; comparing different currencies is an error.
+func (m Money) Cmp(o Money) (int, error) {
+	if err := m.compatible(o); err != nil {
+		return 0, err
+	}
+	switch {
+	case m.minor < o.minor:
+		return -1, nil
+	case m.minor > o.minor:
+		return 1, nil
+	default:
+		return 0, nil
+	}
+}
+
+func (m Money) compatible(o Money) error {
+	if !m.IsValid() || !o.IsValid() {
+		return ErrZeroValue
+	}
+	if m.currency != o.currency {
+		return fmt.Errorf("%w: %s vs %s", ErrCurrencyMismatch, m.currency, o.currency)
+	}
+	return nil
 }
