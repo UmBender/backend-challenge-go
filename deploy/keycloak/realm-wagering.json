@@ -1,0 +1,8 @@
+{
+  "realm": "wagering",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 300,
+  "clients": []
+}

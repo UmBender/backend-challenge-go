@@ -58,6 +58,29 @@ services:
       timeout: 3s
       retries: 60
 
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./deploy/keycloak/realm-wagering.json:/opt/keycloak/data/import/realm-wagering.json:ro,z
+    ports:
+      - "127.0.0.1:${KEYCLOAK_HOST_PORT:-8180}:8080"
+    healthcheck:
+      # The image has no curl; bash's /dev/tcp queries the management port.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
   migrate:
     image: migrate/migrate:v4.19.0
     volumes:
