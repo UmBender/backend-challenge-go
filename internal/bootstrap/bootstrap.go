@@ -1,9 +1,12 @@
+// Package bootstrap is the composition root: the only place that lists every
+// Fx module. cmd/wallet runs it; tests validate and start the same graph.
 package bootstrap
 
 import (
 	"go.uber.org/fx"
 
 	"github.com/UmBender/backend-challenge-go/internal/adapters/httpapi"
+	"github.com/UmBender/backend-challenge-go/internal/adapters/postgres"
 	"github.com/UmBender/backend-challenge-go/internal/platform/config"
 	"github.com/UmBender/backend-challenge-go/internal/platform/health"
 	"github.com/UmBender/backend-challenge-go/internal/platform/logging"
@@ -17,6 +20,7 @@ func Modules() fx.Option {
 		logging.Module,
 		metrics.Module,
 		health.Module,
+		postgres.Module,
 		httpapi.Module,
 	)
 }
