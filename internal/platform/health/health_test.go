@@ -74,3 +74,12 @@ func TestEvaluateRunsChecksConcurrently(t *testing.T) {
 		t.Fatalf("checks ran serially: %v", elapsed)
 	}
 }
+
+func TestShuttingDownIsNeverReady(t *testing.T) {
+	r := New([]Check{fakeCheck{name: "postgres"}}, time.Second)
+	r.MarkShuttingDown()
+	status, _ := r.Evaluate(context.Background())
+	if status.Ready || status.Reason != "shutting down" {
+		t.Fatalf("status = %+v", status)
+	}
+}

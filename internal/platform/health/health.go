@@ -6,6 +6,7 @@ package health
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/fx"
@@ -33,10 +34,11 @@ type Status struct {
 }
 
 // Readiness evaluates every registered Check concurrently, each under its own
-// timeout.
+// timeout, and reports not ready as soon as shutdown begins.
 type Readiness struct {
-	checks  []Check
-	timeout time.Duration
+	checks       []Check
+	timeout      time.Duration
+	shuttingDown atomic.Bool
 }
 
 // ReadinessParams lets Fx inject the whole readiness group.
@@ -55,10 +57,17 @@ func New(checks []Check, timeout time.Duration) *Readiness {
 	return &Readiness{checks: checks, timeout: timeout}
 }
 
+// MarkShuttingDown makes every later evaluation report not ready. It is the
+// first step of a graceful stop, before in-flight work is drained.
+func (r *Readiness) MarkShuttingDown() { r.shuttingDown.Store(true) }
+
 // Evaluate runs all checks and never takes longer than the per-check timeout.
 // Error texts are not returned to callers: only "ok" or "unavailable", so the
 // public endpoint does not leak hostnames or driver messages.
 func (r *Readiness) Evaluate(ctx context.Context) (Status, map[string]error) {
+	if r.shuttingDown.Load() {
+		return Status{Ready: false, Reason: "shutting down"}, nil
+	}
 	type result struct {
 		name string
 		err  error
