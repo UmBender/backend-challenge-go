@@ -2,7 +2,7 @@ COMPOSE ?= docker compose
 MIGRATE  = $(COMPOSE) run --rm migrate -path=/migrations \
 	-database=postgres://wallet_owner:$${WALLET_OWNER_PASSWORD:-wallet_owner}@postgres:5432/wallet?sslmode=disable
 
-.PHONY: help up down down-volumes ps migrate-up migrate-down migrate-version \
+.PHONY: help up down down-volumes ps logs migrate-up migrate-down migrate-version \
 	fmt fmt-check vet test test-race test-integration check
 
 help:
@@ -20,6 +20,9 @@ down-volumes:
 ps:
 	$(COMPOSE) ps
 
+logs:
+	$(COMPOSE) logs -f wallet-1 wallet-2 wallet-3
+
 migrate-up:
 	$(MIGRATE) up
 
@@ -36,6 +39,7 @@ fmt-check:
 	@test -z "$$(gofmt -l .)" || (gofmt -l . && echo "run: make fmt" && exit 1)
 
 vet:
+	go vet ./...
 	go vet -tags=integration ./...
 
 test:
