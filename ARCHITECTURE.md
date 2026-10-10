@@ -16,6 +16,16 @@ migrations/          SQL versionado (up/down)
 deploy/              initdb do PostgreSQL, filas do LocalStack, realm do Keycloak
 ```
 
+## Dinheiro
+
+- `Money{minor int64; currency Currency}` em `internal/domain/money`: imutável, campos não exportados, construído só por `Parse`, `FromMinor` e `Zero`. No transporte é a string `"25.00"`; no banco será `BIGINT` em centavos.
+- Nenhum ponto flutuante em parsing, aritmética, formatação ou JSON. `internal/archtest` percorre a AST dos caminhos de dinheiro e falha em `float32/float64`, `strconv.*Float*`, `math`, `math/big`, `json.Number`, `.Float64()` e verbos `%f/%e/%g`; um fixture prova que cada regra dispara.
+- Gramática de entrada estrita, `^(0|[1-9][0-9]*)\.[0-9]{2}$`: exatamente duas casas, sem sinal, sem zeros à esquerda. `"25"`, `"25.0"` e `"01.00"` são rejeitados, nunca normalizados nem arredondados. Cada valor tem uma única forma textual, então o hash de idempotência não precisa de normalização. Fuzz garante que `Parse(s).String() == s`.
+- Overflow do `int64` é verificado em `Parse`, `Add`, `Sub` e `Neg` (inclusive `-MinInt64`).
+- `Currency` é opaca, com whitelist `BRL` e `USD` (esta para os testes de divergência). Toda moeda suportada tem duas casas decimais; uma moeda com outra escala exigiria escala por moeda.
+- O zero value `Money{}` é rejeitado por toda operação; moedas diferentes em `Add`, `Sub` e `Cmp` são erro.
+- JSON `{"amount":"25.00","currency":"BRL"}`. A leitura rejeita números JSON, chaves desconhecidas, duplicadas ou com outra caixa, e aplica `Parse` (valores negativos não entram por fronteira externa). Valores negativos internos, como diferenças, podem ser serializados.
+
 ## Uso do Fx
 
 - `bootstrap.Modules()` é a lista única de módulos, usada pelo `main` e pelos testes. `fx.ValidateApp` valida o grafo sem Docker.
@@ -71,7 +81,7 @@ Keycloak sobe com o realm `wagering` importado, ainda sem clients. A integraçã
 
 ## Limitações e trabalho não concluído
 
-- Ainda não implementados: dinheiro, domínio, schema de negócio, idempotência, locks, referências pendentes, reversões, inbox/outbox, autenticação e autorização.
+- Ainda não implementados: domínio, schema de negócio, idempotência, locks, referências pendentes, reversões, inbox/outbox, autenticação e autorização.
 - O `iss` dos tokens difere entre o host (`localhost:8180`) e a rede Docker (`keycloak:8080`); precisa ser resolvido na integração com o IdP.
 - `/metrics` é público na porta da API.
 - Readiness inclui o SQS, como pede o enunciado: com o SQS fora, a réplica fica *not ready* mesmo podendo atender HTTP.
