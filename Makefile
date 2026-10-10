@@ -1,5 +1,9 @@
 COMPOSE ?= docker compose
-.PHONY: help up down down-volumes ps fmt fmt-check vet test test-race check
+MIGRATE  = $(COMPOSE) run --rm migrate -path=/migrations \
+	-database=postgres://wallet_owner:$${WALLET_OWNER_PASSWORD:-wallet_owner}@postgres:5432/wallet?sslmode=disable
+
+.PHONY: help up down down-volumes ps migrate-up migrate-down migrate-version \
+	fmt fmt-check vet test test-race check
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -15,6 +19,15 @@ down-volumes:
 
 ps:
 	$(COMPOSE) ps
+
+migrate-up:
+	$(MIGRATE) up
+
+migrate-down:
+	$(MIGRATE) down 1
+
+migrate-version:
+	$(MIGRATE) version
 
 fmt:
 	gofmt -w .

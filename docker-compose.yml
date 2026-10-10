@@ -18,5 +18,19 @@ services:
       timeout: 3s
       retries: 30
 
+  migrate:
+    image: migrate/migrate:v4.19.0
+    volumes:
+      - ./migrations:/migrations:ro,z
+    # Runs as the owner role, never as the application role.
+    command:
+      - -path=/migrations
+      - -database=postgres://wallet_owner:${WALLET_OWNER_PASSWORD:-wallet_owner}@postgres:5432/wallet?sslmode=disable
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
 volumes:
   postgres-data:
