@@ -7,6 +7,7 @@ import (
 
 	"github.com/UmBender/backend-challenge-go/internal/adapters/httpapi"
 	"github.com/UmBender/backend-challenge-go/internal/adapters/postgres"
+	"github.com/UmBender/backend-challenge-go/internal/adapters/sqsclient"
 	"github.com/UmBender/backend-challenge-go/internal/platform/config"
 	"github.com/UmBender/backend-challenge-go/internal/platform/health"
 	"github.com/UmBender/backend-challenge-go/internal/platform/logging"
@@ -21,6 +22,7 @@ func Modules() fx.Option {
 		metrics.Module,
 		health.Module,
 		postgres.Module,
+		sqsclient.Module,
 		httpapi.Module,
 	)
 }

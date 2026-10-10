@@ -16,14 +16,14 @@ import (
 	"go.uber.org/fx/fxtest"
 )
 
-// TestAppStartsServesAndStops runs the real graph against real PostgreSQL
-// (the Compose service) and checks the lifecycle contract of T0:
+// TestAppStartsServesAndStops runs the real graph against real PostgreSQL and
+// SQS (the Compose services) and checks the lifecycle contract of T0:
 // start validates dependencies, readiness is green, stop drains HTTP, closes
 // the pool and releases the port.
 //
 // Needs the infra running (`make up`) and the variables from .env.example.
 func TestAppStartsServesAndStops(t *testing.T) {
-	requireEnv(t, "DATABASE_URL", "AWS_REGION")
+	requireEnv(t, "DATABASE_URL", "AWS_REGION", "AWS_ENDPOINT_URL")
 	addr := freeAddr(t)
 	t.Setenv("HTTP_ADDR", addr)
 	t.Setenv("INSTANCE_ID", "integration-test")
@@ -39,7 +39,7 @@ func TestAppStartsServesAndStops(t *testing.T) {
 		Checks map[string]string `json:"checks"`
 	}
 	getJSON(t, base+"/health/ready", http.StatusOK, &ready)
-	if !ready.Ready || ready.Checks["postgres"] != "ok" {
+	if !ready.Ready || ready.Checks["postgres"] != "ok" || ready.Checks["sqs"] != "ok" {
 		t.Fatalf("readiness = %+v", ready)
 	}
 
@@ -51,6 +51,22 @@ func TestAppStartsServesAndStops(t *testing.T) {
 	if conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
 		conn.Close()
 		t.Fatal("HTTP port still accepting connections after stop")
+	}
+}
+
+// TestStartFailsFastWhenADependencyIsMissing points the app at a queue that
+// does not exist: start must fail instead of serving a broken instance.
+func TestStartFailsFastWhenADependencyIsMissing(t *testing.T) {
+	requireEnv(t, "DATABASE_URL", "AWS_REGION", "AWS_ENDPOINT_URL")
+	t.Setenv("HTTP_ADDR", freeAddr(t))
+	t.Setenv("SQS_EVENTS_QUEUE_NAME", "does-not-exist.fifo")
+
+	app := fx.New(Modules(), fx.NopLogger)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := app.Start(ctx); err == nil {
+		_ = app.Stop(context.Background())
+		t.Fatal("start succeeded with a missing queue")
 	}
 }
 
