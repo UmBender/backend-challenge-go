@@ -18,6 +18,22 @@ services:
       timeout: 3s
       retries: 30
 
+  localstack:
+    image: localstack/localstack:4.9
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+    volumes:
+      - ./deploy/localstack/init/ready.d:/etc/localstack/init/ready.d:ro,z
+    ports:
+      - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4566}:4566"
+    healthcheck:
+      # Healthy only after the ready.d scripts (queue creation) completed.
+      test: ["CMD-SHELL", "curl -sf localhost:4566/_localstack/init/ready | grep -q '\"completed\": true'"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
   migrate:
     image: migrate/migrate:v4.19.0
     volumes:
