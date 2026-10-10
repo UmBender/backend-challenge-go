@@ -1,0 +1,9 @@
+.git
+.env
+*.md
+deploy
+migrations
+Makefile
+docker-compose.yml
+bin
+coverage.*
