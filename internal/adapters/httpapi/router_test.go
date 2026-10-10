@@ -93,3 +93,19 @@ func TestUnknownMethodAndPath(t *testing.T) {
 		t.Fatalf("POST /health/live = %d, want 405", rec.Code)
 	}
 }
+
+func TestMetricsUseRoutePatternLabels(t *testing.T) {
+	h, _, _ := newTestRouter(t)
+	get(t, h, "/health/live")
+	get(t, h, "/does-not-exist/123")
+	body := get(t, h, "/metrics").Body.String()
+	if !strings.Contains(body, `http_request_duration_seconds_count{code="200",method="GET",route="GET /health/live"} 1`) {
+		t.Fatalf("missing labelled request metric:\n%s", body)
+	}
+	if strings.Contains(body, "/does-not-exist/123") {
+		t.Fatal("raw paths must never become label values")
+	}
+	if !strings.Contains(body, `route="unmatched"`) {
+		t.Fatal("unmatched requests should be grouped under one label")
+	}
+}
