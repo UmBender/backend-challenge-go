@@ -31,7 +31,7 @@ const (
 var ctx = context.Background()
 
 // schemaTables is every table the migrations create.
-var schemaTables = []string{"wallets", "wager_transactions", "wallet_ledger_entries"}
+var schemaTables = []string{"wallets", "wager_transactions", "wallet_ledger_entries", "inbox_messages", "outbox_events"}
 
 func tables(t *testing.T, conn *pgx.Conn) []string {
 	t.Helper()
@@ -382,4 +382,68 @@ func TestLedgerIsAppendOnly(t *testing.T) {
 	if err := app.QueryRow(ctx, `SELECT count(*) FROM wallet_ledger_entries`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("entries = %d, %v; the entry must survive every attempt", n, err)
 	}
+}
+
+func TestInboxConstraints(t *testing.T) {
+	t.Parallel()
+	db := pgtest.New(t)
+	app := db.Conn(t, pgtest.App)
+	msg := row{"consumer_name": "wager-consumer", "message_id": "msg-1", "payload_hash": payloadHash[:],
+		"received_at": "2026-09-08T12:00:00Z"}
+	expectInsert(t, app, "inbox_messages", "", msg)
+	for name, tt := range map[string]struct {
+		r    row
+		code string
+	}{
+		// §6.5: unique (consumerName, messageId).
+		"redelivered message":       {msg, uniqueViolation},
+		"other consumer, same id":   {msg.with(row{"consumer_name": "audit-consumer"}), ""},
+		"hash not sha-256":          {msg.with(row{"message_id": "msg-2", "payload_hash": []byte("x")}), checkViolation},
+		"unknown transaction":       {msg.with(row{"message_id": "msg-3", "transaction_id": uuid.New()}), foreignKeyViolation},
+		"completed before received": {msg.with(row{"message_id": "msg-4", "completed_at": "2026-09-08T11:00:00Z"}), checkViolation},
+	} {
+		t.Run(name, func(t *testing.T) { expectInsert(t, app, "inbox_messages", tt.code, tt.r) })
+	}
+	expectCode(t, app, insufficientPrivilege, `DELETE FROM inbox_messages`)
+}
+
+func outboxEvent(aggregate uuid.UUID) row {
+	id := uuid.New()
+	return row{
+		"event_id": id, "aggregate_type": "Wallet", "aggregate_id": aggregate,
+		"event_type": "WalletBalanceChanged", "event_version": 1,
+		"payload":     fmt.Sprintf(`{"eventId":"%s","eventType":"WalletBalanceChanged"}`, id),
+		"occurred_at": "2026-09-08T12:00:00Z", "next_attempt_at": "2026-09-08T12:00:00Z",
+	}
+}
+
+// TestOutboxEnvelopeIsImmutable: the stored envelope is the exact message to
+// publish, every time, with the same eventId (§11); only delivery bookkeeping
+// may change, and a published row is final.
+func TestOutboxEnvelopeIsImmutable(t *testing.T) {
+	t.Parallel()
+	db := pgtest.New(t)
+	app := db.Conn(t, pgtest.App)
+	ev := outboxEvent(uuid.New())
+	expectInsert(t, app, "outbox_events", "", ev)
+	expectInsert(t, app, "outbox_events", uniqueViolation, ev)
+	expectInsert(t, app, "outbox_events", checkViolation, outboxEvent(uuid.New()).with(row{"attempts": -1}))
+	id := ev["event_id"]
+
+	for _, sql := range []string{
+		`UPDATE outbox_events SET payload = '{}' WHERE event_id = $1`,
+		`UPDATE outbox_events SET event_type = 'Other' WHERE event_id = $1`,
+		`UPDATE outbox_events SET aggregate_id = gen_random_uuid() WHERE event_id = $1`,
+		`UPDATE outbox_events SET occurred_at = now() WHERE event_id = $1`,
+	} {
+		expectCode(t, app, checkViolation, sql, id)
+	}
+	// Claim, fail, release, claim again, publish: all allowed.
+	mustExec(t, app, `UPDATE outbox_events SET locked_by = 'wallet-1', locked_until = now() + interval '30 seconds',
+		attempts = attempts + 1 WHERE event_id = $1`, id)
+	mustExec(t, app, `UPDATE outbox_events SET locked_by = NULL, locked_until = NULL, last_error = 'sqs down',
+		next_attempt_at = now() + interval '1 second' WHERE event_id = $1`, id)
+	mustExec(t, app, `UPDATE outbox_events SET published_at = now(), locked_by = NULL, locked_until = NULL WHERE event_id = $1`, id)
+	expectCode(t, app, checkViolation, `UPDATE outbox_events SET published_at = NULL WHERE event_id = $1`, id)
+	expectCode(t, app, insufficientPrivilege, `DELETE FROM outbox_events WHERE event_id = $1`, id)
 }
