@@ -163,6 +163,7 @@ Os cenários são caixa-preta, pelos três processos separados, com tokens reais
 - dez carteiras com dez apostas cada, por todas as réplicas;
 - `REFUND` antes do `BET` em réplicas diferentes, concluído pelo worker de qualquer uma;
 - a mesma operação por HTTP e por SQS: um efeito só;
+- **reinício:** depois de uma aposta processada e de um `REFUND` pendente, as três réplicas são mortas com `SIGKILL` e religadas; o replay devolve o resultado original e a pendência é concluída quando a referência chega;
 - **falha:** `wallet-2` é morta com `SIGKILL` (`docker compose kill -s SIGKILL wallet-2`) no meio da carga; os clientes repetem com a mesma `Idempotency-Key` em outra réplica, cada aposta é aplicada uma única vez, e a réplica é religada no fim;
 - no fim de cada cenário, a reconciliação confirma saldo = ledger; por último, o outbox de todas as réplicas fica vazio.
 
