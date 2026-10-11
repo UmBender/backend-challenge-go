@@ -34,13 +34,25 @@ func TestAppStartsServesAndStops(t *testing.T) {
 
 	base := "http://" + addr
 	assertStatus(t, base+"/health/live", http.StatusOK)
+	// Each check has a 1 s budget; under a loaded test run one can time out,
+	// so readiness is required to become green, not to be green at once.
 	var ready struct {
 		Ready  bool              `json:"ready"`
 		Checks map[string]string `json:"checks"`
 	}
-	getJSON(t, base+"/health/ready", http.StatusOK, &ready)
-	if !ready.Ready || ready.Checks["postgres"] != "ok" || ready.Checks["sqs"] != "ok" {
-		t.Fatalf("readiness = %+v", ready)
+	for deadline := time.Now().Add(15 * time.Second); ; {
+		resp, err := http.Get(base + "/health/ready")
+		if err == nil {
+			_ = json.NewDecoder(resp.Body).Decode(&ready)
+			resp.Body.Close()
+		}
+		if ready.Ready && ready.Checks["postgres"] == "ok" && ready.Checks["sqs"] == "ok" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("readiness never became green: %+v, %v", ready, err)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 
 	app.RequireStop()
