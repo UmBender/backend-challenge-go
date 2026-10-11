@@ -408,6 +408,64 @@ func compose(t *testing.T, args ...string) {
 	}
 }
 
+// waitReady blocks until every replica answers readiness.
+func waitReady(t *testing.T) {
+	t.Helper()
+	for _, base := range replicas {
+		eventually(t, base+" ready", func() bool {
+			resp, err := http.Get(base + "/health/ready")
+			if err != nil {
+				return false
+			}
+			resp.Body.Close()
+			return resp.StatusCode == 200
+		})
+	}
+}
+
+// §13.8: every replica is killed abruptly (SIGKILL) and started again. A
+// processed operation still replays its original result, and an operation
+// left waiting for its reference is resumed by whichever replica gets to it.
+func TestRestartPreservesIdempotencyAndPendings(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker CLI not available")
+	}
+	w := openWallet(t, "100.00")
+	bet, refund, late := "restart-bet-"+w.id[24:], "restart-refund-"+w.id[24:], "restart-late-"+w.id[24:]
+	first := mustSubmit(t, replicas[0], w, "BET", "10.00", bet, "")
+	if first.code != 201 {
+		t.Fatalf("bet: %d %v", first.code, first.body)
+	}
+	if r := mustSubmit(t, replicas[1], w, "REFUND", "20.00", refund, late); r.code != 202 {
+		t.Fatalf("refund: %d %v", r.code, r.body)
+	}
+
+	compose(t, "kill", "-s", "SIGKILL", "wallet-1", "wallet-2", "wallet-3")
+	compose(t, "start", "wallet-1", "wallet-2", "wallet-3")
+	waitReady(t)
+
+	replay := mustSubmit(t, replicas[2], w, "BET", "10.00", bet, "")
+	if replay.code != 200 || replay.body["idempotentReplay"] != true || replay.body["transactionId"] != first.body["transactionId"] ||
+		replay.body["balance"].(map[string]any)["amount"] != "90.00" {
+		t.Fatalf("replay after restart: %d %v", replay.code, replay.body)
+	}
+	v := mustCall(t, replicas[0], "provider-a", http.MethodGet, "/providers/provider-a/wagering/transactions/"+refund, "")
+	if v.body["status"] != "PENDING_REFERENCE" {
+		t.Fatalf("pending refund after restart: %v", v.body)
+	}
+	if r := mustSubmit(t, replicas[1], w, "BET", "20.00", late, ""); r.code != 201 {
+		t.Fatalf("late bet: %d %v", r.code, r.body)
+	}
+	eventually(t, "pending refund resumed after restart", func() bool {
+		v := mustCall(t, replicas[2], "provider-a", http.MethodGet, "/providers/provider-a/wagering/transactions/"+refund, "")
+		return v.body["status"] == "PROCESSED"
+	})
+	if got := balance(t, w); got != "90.00" {
+		t.Fatalf("balance = %s, want 90.00", got)
+	}
+	assertReconciled(t, w)
+}
+
 // After the scenarios, every committed event is eventually published.
 func TestZZOutboxDrains(t *testing.T) {
 	eventually(t, "outbox drained on every replica", func() bool {
