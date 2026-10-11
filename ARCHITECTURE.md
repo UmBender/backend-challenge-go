@@ -139,6 +139,21 @@ Cada invariante financeira tem uma constraint, um índice único parcial ou um t
 - Métricas: `outbox_events_published_total`, `outbox_publish_failures_total` e `outbox_lag_seconds` (idade do evento mais antigo não publicado).
 - Testes de integração com PostgreSQL e LocalStack reais: publicação dos eventos commitados (grupo e deduplicação corretos), dois publicadores concorrentes enviando cada evento exatamente uma vez, broker fora do ar (nada perdido, reagendado e publicado na volta) e lease expirado retomado por outro publicador.
 
+## Consumidor SQS e inbox
+
+- Toda réplica consome `wager-transactions.fifo` com long polling de 20 s e até 10 mensagens por vez. Mensagens do mesmo `MessageGroupId` são processadas em ordem; grupos diferentes, em paralelo (até 4).
+- O envelope do §10 é lido de forma estrita (campos desconhecidos rejeitados, UUIDs canônicos, dinheiro como string) e vira o mesmo `SubmitCommand` do HTTP, com a chave `data.idempotencyKey`: validação, hash e garantias financeiras são as do caminho HTTP.
+- A inbox `(consumer_name, message_id)` é gravada e concluída na mesma transação SQL das mudanças de domínio, do ledger e dos eventos. Uma reentrega encontra a linha concluída e responde com o resultado armazenado, sem novo efeito; o mesmo `messageId` com outro conteúdo (hash do payload e da chave) é permanente e vai para a DLQ. Uma operação enviada por HTTP e depois por SQS é um replay. Uma referência pendente conclui a mensagem assim que a pendência é persistida; o worker continua a partir daí.
+- A mensagem só é removida depois do commit. Se o processo morrer entre o commit e a remoção, a reentrega é um replay.
+- Classificação:
+  - sucesso, replay ou rejeição de negócio → remove;
+  - mensagem malformada, request inválido, chave reutilizada, external id com outra chave, carteira inexistente, `messageId` reutilizado ou violação de invariante → encaminha explicitamente para `wager-transactions-dlq.fifo` (com o motivo em `failureReason`) e remove;
+  - indisponibilidade, conflito esgotado, timeout ou erro desconhecido → torna a mensagem visível de novo com backoff (2 s a 30 s), sem processar as seguintes do mesmo grupo; após `maxReceiveCount = 5` recebimentos a política de redrive leva a mensagem para a DLQ.
+- Limites: visibility timeout de 60 s na fila e 10 s por mensagem no processamento, então uma mensagem nunca é reentregue enquanto ainda está sendo tratada.
+- `SIGTERM`: para de buscar mensagens, conclui as que estão em andamento (sem cancelá-las) e libera a visibilidade das que ainda não começaram.
+- Produtores: `MessageGroupId` = `walletId` (ordem por carteira) e `MessageDeduplicationId` = `messageId`; a deduplicação do SQS cobre 5 minutos, e a inbox cobre o resto.
+- Testes de integração com LocalStack e PostgreSQL: processamento e remoção, reentrega com um único efeito, rejeição de negócio removida sem DLQ, mensagens malformadas na DLQ sem nenhuma transação criada, falha transitória persistente levada à DLQ pelo redrive; no nível do caso de uso, `messageId` reutilizado, HTTP seguido de SQS e referência pendente.
+
 ## Uso do Fx
 
 - `bootstrap.Modules()` é a lista única de módulos, usada pelo `main` e pelos testes. `fx.ValidateApp` valida o grafo sem Docker.
@@ -175,7 +190,7 @@ Variáveis de ambiente lidas com a stdlib e validadas no start; todos os erros s
 
 ## Mensageria
 
-LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada redireciona para a DLQ após 5 recebimentos, não usa deduplicação por conteúdo (os produtores enviam ids explícitos) e faz long polling de 20 s. Valores a confirmar junto com o consumidor.
+LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada redireciona para a DLQ após 5 recebimentos, não usa deduplicação por conteúdo (os produtores enviam ids explícitos), tem visibility timeout de 60 s e faz long polling de 20 s.
 
 ## Autenticação e autorização
 
@@ -200,7 +215,6 @@ LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada r
 
 ## Limitações e trabalho não concluído
 
-- Ainda não implementado: o consumidor SQS com inbox.
 - Os testes de concorrência usam goroutines num único processo; a demonstração com três processos ainda não foi feita.
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
 - Com o Keycloak fora do ar e sem chaves em cache, as requisições de negócio recebem 401, não 503.
