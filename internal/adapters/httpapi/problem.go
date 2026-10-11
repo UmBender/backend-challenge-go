@@ -33,6 +33,7 @@ const (
 	codeServiceUnavailable   = "SERVICE_UNAVAILABLE"
 	codeInternalError        = "INTERNAL_ERROR"
 	codeUnsupportedMediaType = "UNSUPPORTED_MEDIA_TYPE"
+	codePayloadTooLarge      = "PAYLOAD_TOO_LARGE"
 	retryAfterSeconds        = "1"
 	problemContentType       = "application/problem+json"
 	problemTypeBlank         = "about:blank"
@@ -75,6 +76,10 @@ func writeError(w http.ResponseWriter, r *http.Request, log *slog.Logger, err er
 		writeProblem(w, r, http.StatusBadRequest, codeInvalidMoney, err.Error())
 	case errors.Is(err, errInvalidBody), errors.Is(err, wallet.ErrInvalidWallet), errors.Is(err, app.ErrInvalidPage):
 		writeProblem(w, r, http.StatusBadRequest, codeInvalidRequest, err.Error())
+	case errors.Is(err, errUnsupportedMediaType):
+		writeProblem(w, r, http.StatusUnsupportedMediaType, codeUnsupportedMediaType, err.Error())
+	case errors.Is(err, errBodyTooLarge):
+		writeProblem(w, r, http.StatusRequestEntityTooLarge, codePayloadTooLarge, err.Error())
 	case errors.Is(err, errProviderMismatch):
 		writeProblem(w, r, http.StatusForbidden, codeProviderMismatch, "providerId does not match the authenticated provider")
 	case errors.Is(err, app.ErrWalletNotFound):
