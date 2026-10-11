@@ -49,6 +49,16 @@ make migrate-down      # reverte a última
 make migrate-version   # versão atual
 ```
 
+| Migration | Conteúdo |
+| --- | --- |
+| `000001_schema_privileges` | privilégios do schema `public` |
+| `000002_wallets` | carteiras e trigger de versão |
+| `000003_wager_transactions` | transações, idempotência por provedor, estado terminal imutável |
+| `000004_ledger` | ledger append-only |
+| `000005_inbox_outbox` | inbox e outbox |
+
+Reverter tudo: `docker compose run --rm migrate -path=/migrations -database=postgres://wallet_owner:wallet_owner@postgres:5432/wallet?sslmode=disable down -all`. Reverter a `000004` apaga o ledger.
+
 Os roles são criados por `deploy/postgres/initdb/10-roles.sh` apenas na primeira inicialização do volume. Para recriar do zero: `make down-volumes`.
 
 ## Variáveis de ambiente
