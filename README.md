@@ -7,6 +7,7 @@ Serviço de carteiras para operações de apostas. Enunciado: [PROPOSAL.md](PROP
 - Docker com Docker Compose v2. No Fedora: `sudo dnf install moby-engine docker-compose && sudo systemctl enable --now docker`.
 - Go 1.26.8, para rodar os testes no host.
 - `make` (opcional; `make help` lista os alvos).
+- `curl` e `jq`, para os exemplos de chamadas.
 
 ## Subir o ambiente
 
@@ -128,7 +129,31 @@ Os roles são criados por `deploy/postgres/initdb/10-roles.sh` apenas na primeir
 
 ## Variáveis de ambiente
 
-Todas estão em [.env.example](.env.example), com valores locais. Obrigatórias: `DATABASE_URL` e `AWS_REGION`. Credenciais AWS seguem a cadeia padrão do SDK. Configuração inválida encerra o processo com código 1, listando todos os problemas.
+Todas estão em [.env.example](.env.example), com valores locais. O Compose já define as do serviço para as três réplicas; o `.env` só é necessário para mudar algo. Configuração inválida encerra o processo com código 1, listando todos os problemas.
+
+| Variáveis | Para quê | Padrão |
+| --- | --- | --- |
+| `DATABASE_URL` | conexão do serviço (role `wallet_app`) | **obrigatória** |
+| `DB_MAX_CONNS` | conexões por réplica | `10` |
+| `AWS_REGION`, `AWS_ENDPOINT_URL` | região e endpoint do SQS (LocalStack) | região **obrigatória**; endpoint vazio = AWS real |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | credencial do broker (cadeia padrão do SDK) | no Compose: identidade `wallet-service` |
+| `SQS_WAGER_QUEUE_NAME`, `SQS_DLQ_NAME`, `SQS_EVENTS_QUEUE_NAME` | filas (precisam terminar em `.fifo`) | `wager-transactions.fifo`, `wager-transactions-dlq.fifo`, `wallet-events.fifo` |
+| `OIDC_ISSUER`, `OIDC_JWKS_URL`, `OIDC_AUDIENCE` | validação dos tokens do Keycloak | `http://localhost:8180/realms/wagering`, `<issuer>/protocol/openid-connect/certs`, `wallet-api` |
+| `HTTP_ADDR`, `HTTP_*_TIMEOUT`, `HTTP_REQUEST_TIMEOUT` | servidor HTTP e prazo de cada requisição de negócio | `:8080`; request `10s` (menor que o write timeout) |
+| `START_TIMEOUT`, `SHUTDOWN_TIMEOUT`, `HTTP_SHUTDOWN_TIMEOUT` | prazos de start e stop | `30s`, `25s`, `10s` (o dreno HTTP precisa ser menor que o stop) |
+| `PENDING_REFERENCE_TTL`, `PENDING_MAX_ATTEMPTS`, `PENDING_BACKOFF_BASE`, `PENDING_BACKOFF_CAP` | espera por referências | `15m`, `10`, `1s`, `2m` |
+| `INSTANCE_ID`, `LOG_LEVEL` | identificação da réplica nos logs e nível de log | hostname, `info` |
+| `POSTGRES_PASSWORD`, `WALLET_OWNER_PASSWORD`, `WALLET_APP_PASSWORD`, `KEYCLOAK_ADMIN_PASSWORD`, `*_HOST_PORT` | senhas locais e portas dos containers | valores do `.env.example` |
+| `TEST_ADMIN_DATABASE_URL` | só testes: superusuário que cria um banco por teste | `postgres://postgres:postgres@localhost:5432/postgres` |
+
+### Rodar uma instância fora do Compose
+
+Com a infraestrutura no ar (`docker compose up -d postgres localstack keycloak migrate`):
+
+```sh
+set -a; . ./.env.example; set +a
+go run ./cmd/wallet      # escuta em :8080, mesmo comportamento de uma réplica
+```
 
 ## Testes
 
@@ -169,6 +194,8 @@ Os cenários são caixa-preta, pelos três processos separados, com tokens reais
 - **falha:** `wallet-2` é morta com `SIGKILL` (`docker compose kill -s SIGKILL wallet-2`) no meio da carga; os clientes repetem com a mesma `Idempotency-Key` em outra réplica, cada aposta é aplicada uma única vez, e a réplica é religada no fim;
 - no fim de cada cenário, a reconciliação confirma saldo = ledger; por último, o outbox de todas as réplicas fica vazio.
 
+Os cenários de falha e reinício usam o `docker` CLI e religam as réplicas sozinhos. Para repetir manualmente: `docker compose kill -s SIGKILL wallet-2`, depois `docker compose start wallet-2`; para parada graciosa, `docker compose stop wallet-2` (os logs mostram a drenagem, e o exit é 0). Um mapa de cada teste obrigatório do §13 para o arquivo que o cobre está no [ARCHITECTURE.md](ARCHITECTURE.md#mapa-dos-testes-obrigatórios-13).
+
 ### Teste de carga
 
 ```sh
@@ -176,9 +203,7 @@ make test-load   # 60 s, 32 clientes, três réplicas; relatório em Markdown no
 go run ./cmd/loadtest -duration 30s -workers 16 -wallets 20 -dup-ratio 0.1 -hot-ratio 0.2
 ```
 
-Relata throughput, latência p50/p95/p99, status, erros, duplicatas, conflitos e atraso da outbox, e termina reconciliando todas as carteiras. Resultados e metodologia: [ARCHITECTURE.md](ARCHITECTURE.md#teste-de-carga).
-
-O cenário de falha usa o `docker` CLI e religa `wallet-2` sozinho. Para repetir manualmente: `docker compose kill -s SIGKILL wallet-2`, depois `docker compose start wallet-2`; para parada graciosa, `docker compose stop wallet-2` (logs mostram a drenagem e exit 0).
+Relata throughput, latência p50/p95/p99, status, erros, duplicatas, conflitos e atraso da outbox, e termina reconciliando todas as carteiras (sai com erro se alguma não bater). Os números dependem da máquina; o resultado de referência, o ambiente e a metodologia estão em [ARCHITECTURE.md](ARCHITECTURE.md#teste-de-carga).
 
 ## Problemas comuns
 
