@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/google/uuid"
 	"go.uber.org/fx"
 
@@ -48,8 +49,10 @@ var appModule = fx.Module("app",
 		app.NewReconcile,
 		newOutboxRelay,
 		app.NewPendingWorker,
+		newConsumer,
 	),
 	fx.Invoke(
+		func(lc fx.Lifecycle, c *sqsclient.Consumer) { runInBackground(lc, c.Run) },
 		func(lc fx.Lifecycle, r *app.OutboxRelay) { runInBackground(lc, r.Run) },
 		func(lc fx.Lifecycle, w *app.PendingWorker) { runInBackground(lc, w.Run) },
 	),
@@ -68,6 +71,19 @@ func newOutboxRelay(store app.OutboxStore, sender app.EventSender, clock app.Clo
 		PollInterval: 500 * time.Millisecond,
 		BackoffBase:  time.Second,
 		BackoffCap:   time.Minute,
+	})
+}
+
+// The queue's visibility timeout (60 s) is far above ProcessTimeout, so a
+// message is never redelivered while it is still being handled, and the
+// in-flight wait on shutdown fits in the stop budget.
+func newConsumer(client *sqs.Client, queues *sqsclient.Queues, submit *app.SubmitWager, log *slog.Logger) *sqsclient.Consumer {
+	return sqsclient.NewConsumer(client, queues, submit, log, sqsclient.ConsumerConfig{
+		Concurrency:    4,
+		WaitTime:       20,
+		ProcessTimeout: 10 * time.Second,
+		RetryBase:      2 * time.Second,
+		RetryCap:       30 * time.Second,
 	})
 }
 
