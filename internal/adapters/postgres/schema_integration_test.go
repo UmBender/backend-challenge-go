@@ -31,7 +31,7 @@ const (
 var ctx = context.Background()
 
 // schemaTables is every table the migrations create.
-var schemaTables = []string{"wallets", "wager_transactions"}
+var schemaTables = []string{"wallets", "wager_transactions", "wallet_ledger_entries"}
 
 func tables(t *testing.T, conn *pgx.Conn) []string {
 	t.Helper()
@@ -304,4 +304,82 @@ func TestTerminalTransactionsAreFrozen(t *testing.T) {
 	mustExec(t, app, `UPDATE wager_transactions SET status = 'REJECTED', failure_code = 'INSUFFICIENT_FUNDS',
 		processed_at = now(), updated_at = now() WHERE id = $1`, pending["id"])
 	expectCode(t, app, insufficientPrivilege, `DELETE FROM wager_transactions WHERE id = $1`, pending["id"])
+}
+
+// ledgerFixture is a wallet with one processed BET, ready for ledger entries.
+func ledgerFixture(t *testing.T, conn *pgx.Conn) (wallet uuid.UUID, tx uuid.UUID, entry row) {
+	t.Helper()
+	wallet = newWallet(t, conn, 10000)
+	bet := processed(externalBet(wallet, "bet-"+uuid.NewString()))
+	if err := insertRow(conn, "wager_transactions", bet); err != nil {
+		t.Fatal(err)
+	}
+	tx = bet["id"].(uuid.UUID)
+	return wallet, tx, row{
+		"id": uuid.New(), "wallet_id": wallet, "transaction_id": tx, "direction": "DEBIT", "currency": "BRL",
+		"amount_minor": int64(2500), "balance_before_minor": int64(10000), "balance_after_minor": int64(7500),
+		"wallet_version": int64(2), "created_at": "2026-09-08T12:00:00Z",
+	}
+}
+
+func TestLedgerConstraints(t *testing.T) {
+	t.Parallel()
+	db := pgtest.New(t)
+	app := db.Conn(t, pgtest.App)
+	wallet, _, entry := ledgerFixture(t, app)
+	expectInsert(t, app, "wallet_ledger_entries", "", entry)
+
+	_, otherTx, _ := ledgerFixture(t, app) // a transaction of another wallet
+	sameWalletBet := processed(externalBet(wallet, "bet-2"))
+	if err := insertRow(app, "wager_transactions", sameWalletBet); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, tt := range map[string]struct {
+		r    row
+		code string
+	}{
+		// §6.4: after = before ± amount, checked per row.
+		"debit that adds":       {entry.with(row{"id": uuid.New(), "balance_after_minor": int64(12500), "wallet_version": int64(3)}), checkViolation},
+		"credit that subtracts": {entry.with(row{"id": uuid.New(), "direction": "CREDIT", "wallet_version": int64(3)}), checkViolation},
+		"zero amount":           {entry.with(row{"id": uuid.New(), "amount_minor": int64(0), "balance_after_minor": int64(10000), "wallet_version": int64(3)}), checkViolation},
+		"negative after":        {entry.with(row{"id": uuid.New(), "balance_before_minor": int64(1000), "balance_after_minor": int64(-1500), "wallet_version": int64(3)}), checkViolation},
+		"unknown direction":     {entry.with(row{"id": uuid.New(), "direction": "SIDEWAYS", "wallet_version": int64(3)}), checkViolation},
+		// One entry per (wallet, transaction).
+		"second entry for the transaction": {entry.with(row{"id": uuid.New(), "wallet_version": int64(3)}), uniqueViolation},
+		// Two writers that both read version 1 cannot both commit version 2:
+		// a lost update becomes a constraint violation (blueprint §4).
+		"same wallet version twice": {entry.with(row{"id": uuid.New(), "transaction_id": sameWalletBet["id"]}), uniqueViolation},
+		// The entry's currency must be its wallet's.
+		"foreign currency": {entry.with(row{"id": uuid.New(), "transaction_id": sameWalletBet["id"], "currency": "USD", "wallet_version": int64(4)}), foreignKeyViolation},
+		// The transaction must belong to the same wallet.
+		"transaction of another wallet": {entry.with(row{"id": uuid.New(), "transaction_id": otherTx, "wallet_version": int64(5)}), foreignKeyViolation},
+	} {
+		t.Run(name, func(t *testing.T) { expectInsert(t, app, "wallet_ledger_entries", tt.code, tt.r) })
+	}
+}
+
+// TestLedgerIsAppendOnly is guarantee 5/8: the application role lacks the
+// privileges, and the owner (who has them) is stopped by triggers.
+func TestLedgerIsAppendOnly(t *testing.T) {
+	t.Parallel()
+	db := pgtest.New(t)
+	app := db.Conn(t, pgtest.App)
+	owner := db.Conn(t, pgtest.Owner)
+	_, _, entry := ledgerFixture(t, app)
+	expectInsert(t, app, "wallet_ledger_entries", "", entry)
+	id := entry["id"]
+
+	expectCode(t, app, insufficientPrivilege, `UPDATE wallet_ledger_entries SET amount_minor = 1 WHERE id = $1`, id)
+	expectCode(t, app, insufficientPrivilege, `DELETE FROM wallet_ledger_entries WHERE id = $1`, id)
+	expectCode(t, app, insufficientPrivilege, `TRUNCATE wallet_ledger_entries`)
+
+	expectCode(t, owner, restrictViolation, `UPDATE wallet_ledger_entries SET created_at = now() WHERE id = $1`, id)
+	expectCode(t, owner, restrictViolation, `DELETE FROM wallet_ledger_entries WHERE id = $1`, id)
+	expectCode(t, owner, restrictViolation, `TRUNCATE wallet_ledger_entries`)
+
+	var n int
+	if err := app.QueryRow(ctx, `SELECT count(*) FROM wallet_ledger_entries`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("entries = %d, %v; the entry must survive every attempt", n, err)
+	}
 }
