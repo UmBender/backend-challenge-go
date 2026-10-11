@@ -1,24 +1,32 @@
 # Arquitetura
 
-Decisões técnicas do serviço de carteiras, conforme o §15 do [enunciado](PROPOSAL.md). Cada seção é atualizada quando a funcionalidade correspondente é implementada.
+Decisões técnicas do serviço de carteiras, conforme o §15 do [enunciado](PROPOSAL.md). Como executar e testar: [README.md](README.md). Interpretações adotadas, limitações e o que não foi feito estão no fim.
 
 ## Visão geral
 
-Um único binário (`cmd/wallet`) roda a API HTTP e, nas próximas etapas, o consumidor SQS e os workers. Rodam três réplicas idênticas; a corretude depende do PostgreSQL, nunca de estado em memória.
+Um único binário (`cmd/wallet`) roda, em cada réplica, a API HTTP, o consumidor SQS, o publicador da outbox e o worker de referências pendentes. Rodam três réplicas idênticas; a corretude depende do PostgreSQL (locks, constraints, inbox, outbox), nunca de estado em memória.
 
 ```text
-cmd/wallet/          ponto de entrada
-cmd/healthcheck/     probe do HEALTHCHECK (imagem sem shell)
-internal/bootstrap/  composição Fx de todos os módulos
-internal/platform/   config, logging, métricas, health
-internal/adapters/   postgres, sqsclient, httpapi
-migrations/          SQL versionado (up/down)
-deploy/              initdb do PostgreSQL, filas do LocalStack, realm do Keycloak
+cmd/wallet/            ponto de entrada
+cmd/healthcheck/       probe do HEALTHCHECK (imagem sem shell)
+cmd/loadtest/          gerador do teste de carga
+internal/domain/       money, wallet, ledger, wager (máquina de estados e regras), event; só stdlib + uuid
+internal/app/          casos de uso e portas: SubmitWager, OpenWallet, consultas, reconciliação,
+                       OutboxRelay, PendingWorker, hash de idempotência
+internal/adapters/     postgres (TxManager, repositórios, outbox), sqsclient (consumidor, publicador),
+                       httpapi (rotas, JWT, problem details)
+internal/platform/     config, logging, métricas, health
+internal/bootstrap/    composição Fx de todos os módulos e ciclo de vida dos workers
+internal/archtest/     regras verificadas por teste: sem float, domínio sem infraestrutura, políticas do broker
+migrations/            SQL versionado (up/down)
+deploy/                initdb do PostgreSQL, filas e IAM do LocalStack, realm do Keycloak
+tests/e2e/             cenários contra as três réplicas
+scripts/               utilitário que carrega o .env.example nos testes
 ```
 
 ## Dinheiro
 
-- `Money{minor int64; currency Currency}` em `internal/domain/money`: imutável, campos não exportados, construído só por `Parse`, `FromMinor` e `Zero`. No transporte é a string `"25.00"`; no banco será `BIGINT` em centavos.
+- `Money{minor int64; currency Currency}` em `internal/domain/money`: imutável, campos não exportados, construído só por `Parse`, `FromMinor` e `Zero`. No transporte é a string `"25.00"`. No banco, cada valor ocupa duas colunas: `*_minor BIGINT`, em centavos (`amount_minor`, `balance_minor`, `balance_before_minor`...), e `currency char(3)`. Os repositórios convertem com `Money.Minor()` e `money.FromMinor`, sem passar por texto nem por float.
 - Nenhum ponto flutuante em parsing, aritmética, formatação ou JSON. `internal/archtest` percorre a AST dos caminhos de dinheiro e falha em `float32/float64`, `strconv.*Float*`, `math`, `math/big`, `json.Number`, `.Float64()` e verbos `%f/%e/%g`; um fixture prova que cada regra dispara.
 - Gramática de entrada estrita, `^(0|[1-9][0-9]*)\.[0-9]{2}$`: exatamente duas casas, sem sinal, sem zeros à esquerda. `"25"`, `"25.0"` e `"01.00"` são rejeitados, nunca normalizados nem arredondados. Cada valor tem uma única forma textual, então o hash de idempotência não precisa de normalização. Fuzz garante que `Parse(s).String() == s`.
 - Overflow do `int64` é verificado em `Parse`, `Add`, `Sub` e `Neg` (inclusive `-MinInt64`).
@@ -229,13 +237,20 @@ Os resultados de uma operação (processada, pendente, rejeitada) usam o corpo d
 - Cada pacote expõe um `fx.Module`; os casos de uso são fornecidos em `bootstrap`, para que `app` não importe Fx. Os checks de readiness entram por value group (`health.AsCheck`), então um adapter novo registra o seu check sem alterar `health`.
 - `config.Module` fornece as sub-structs (`config.HTTP`, `config.Database`...), para que cada construtor dependa só do que usa.
 - A ordem de start e stop vem do grafo: o Fx executa `OnStart` na ordem de construção e `OnStop` ao contrário. O pool do PostgreSQL é construído antes do servidor HTTP, logo fecha depois dele, sem ordenação manual.
-- Só `cmd/`, `bootstrap` e os arquivos de módulo importam Fx; o domínio não importará Fx, pgx, net/http nem AWS.
+- Só `cmd/`, `bootstrap` e os arquivos de módulo importam Fx; o domínio não importa Fx, pgx, net/http nem AWS, e `internal/archtest` garante isso.
+- Os workers (consumidor SQS, publicador da outbox, worker de pendências) rodam por `runInBackground`: um hook `OnStart` inicia o loop numa goroutine com um context próprio; o `OnStop` cancela esse context e espera o loop terminar, dentro do prazo do Fx. Como cada worker depende do pool e das filas pelo construtor, ele inicia depois deles e para antes deles.
 
 ## Ciclo de vida e shutdown
 
 - **Start:** o `OnStart` faz `Ping` no PostgreSQL e resolve as três filas; falha em qualquer um aborta o processo (fail fast). O servidor faz `net.Listen` síncrono, então porta ocupada também falha o start. Se o `Serve` morrer depois, a aplicação inteira encerra com código 1.
-- **Stop (SIGTERM):** readiness passa a 503 → o HTTP drena as requisições em andamento → o pool do PostgreSQL fecha → exit 0.
-- **Orçamentos encadeados:** `HTTP_SHUTDOWN_TIMEOUT` (10 s) < `SHUTDOWN_TIMEOUT` (25 s, stop do Fx) < `stop_grace_period` (30 s, Compose). A config rejeita valores fora dessa ordem. Os drenos do consumidor e dos workers terão de caber nos mesmos 25 s.
+- **Stop (SIGTERM),** em ordem inversa à do start:
+  1. readiness passa a 503;
+  2. o HTTP para de aceitar conexões e drena as requisições em andamento;
+  3. o consumidor SQS para de buscar mensagens, conclui as que estão em andamento e libera a visibilidade do resto;
+  4. o publicador da outbox e o worker de pendências cancelam a iteração atual (a transação desfaz, ou o evento é reenviado depois com o mesmo `eventId`);
+  5. o pool do PostgreSQL fecha;
+  6. exit 0.
+- **Orçamentos encadeados:** `HTTP_SHUTDOWN_TIMEOUT` (10 s) < `SHUTDOWN_TIMEOUT` (25 s, stop do Fx) < `stop_grace_period` (30 s, Compose). A config rejeita valores fora dessa ordem. O consumidor espera no máximo o long poll (5 s) e o processamento em andamento (10 s); na prática, `docker compose stop` de uma réplica leva cerca de 2 s.
 
 ## Configuração
 
@@ -307,14 +322,43 @@ As validações de domínio continuam no consumidor, como o §2 exige: mesmo uma
 
 - Imagem multi-stage, binários estáticos, runtime distroless sem root.
 - Portas publicadas apenas em `127.0.0.1`. Bind mounts com `:z` para SELinux.
-- As réplicas sobem só depois de PostgreSQL e LocalStack saudáveis e das migrations concluídas.
+- As réplicas sobem só depois de PostgreSQL e LocalStack saudáveis e das migrations concluídas, e usam `restart: on-failure`.
+- O healthcheck do PostgreSQL usa TCP: durante o initdb, o entrypoint roda um servidor temporário só no socket Unix e depois o reinicia. Um check pelo socket ficaria verde cedo demais, e as migrations cairiam nesse reinício.
+- O healthcheck do LocalStack só fica verde quando os scripts de IAM e filas terminaram sem erro. O Keycloak usa `KC_HOSTNAME` fixo, para o `iss` dos tokens ser o mesmo dentro e fora da rede.
 
 ## Testes
 
 - `go test ./...` (sem Docker): dinheiro (com fuzz), domínio e máquina de estados, regras de arquitetura (sem float, domínio sem infraestrutura), config, HTTP (mapeamento de erros, decodificação estrita, autorização, JWT com chave local), relay do outbox e parsing de mensagens SQS.
 - `make test-integration` (build tag `integration`, PostgreSQL, LocalStack e Keycloak reais): constraints e triggers por SQLSTATE, casos de uso e concorrência (goroutines com barreira de largada), HTTP de ponta a ponta, tokens reais, outbox, worker de pendências, consumidor SQS e o ciclo de vida da aplicação completa. Um banco isolado por teste.
 - `make test-e2e` (build tag `e2e`): cenários caixa-preta contra as três réplicas do Compose, que são processos separados, incluindo uma réplica morta com `SIGKILL` sob carga e todas as réplicas mortas e religadas com uma operação já processada e outra pendente. Cada cenário termina com a reconciliação saldo × ledger.
-- O ensaio de entrega é feito a partir de um clone limpo: `docker compose up --build`, depois `make check`, `make test-integration` e `make test-e2e`. Foi esse ensaio que revelou o script de filas sem permissão de execução e o healthcheck do PostgreSQL que passava durante o initdb, ambos corrigidos.
+- `make test-load`: teste de carga contra as três réplicas (seção seguinte).
+- O ensaio de entrega é feito a partir de um clone limpo: `docker compose up --build`, depois `make check`, `make test-integration`, `make test-e2e` e `make test-load`. Foi esse ensaio que revelou o script de filas sem permissão de execução e o healthcheck do PostgreSQL que passava durante o initdb, ambos corrigidos.
+
+### Mapa dos testes obrigatórios (§13)
+
+| Exigência | Onde |
+| --- | --- |
+| `Money`: parsing, escala, limites, entradas inválidas, moedas | `internal/domain/money/*_test.go` (inclui fuzz) |
+| invariantes da carteira, transições, regras dos cinco tipos, política de zero, abertura com metadados e eventos | `internal/domain/{wallet,wager,ledger,event}/*_test.go` |
+| conflito de payload para a mesma chave | `internal/app/submit_wager_integration_test.go` (`TestIdempotencyConflicts`) |
+| migrations, constraints, imutabilidade do ledger | `internal/adapters/postgres/schema_integration_test.go` |
+| atomicidade financeira, reentrega, inbox | `internal/app/{submit_wager,inbox}_integration_test.go` |
+| outbox concorrente, retry, recuperação de publicação | `internal/app/outbox_relay_integration_test.go` |
+| DLQ e retry no consumidor | `internal/adapters/sqsclient/consumer_integration_test.go` |
+| composição Fx, início, encerramento e liberação de recursos | `internal/bootstrap/*_test.go` |
+| IdP real; credenciais ausentes, inválidas, expiradas; isolamento entre provedores; operações internas restritas | `internal/adapters/httpapi/keycloak_integration_test.go` |
+| 1. a mesma aposta 50× em paralelo | `TestSameBet50TimesConcurrently`; e 30× entre as réplicas em `tests/e2e` |
+| 2. 80.00 + 80.00 sobre 100.00 | `TestTwoConcurrentBetsOf80On100`; e entre réplicas em `tests/e2e` |
+| 3. carteiras distintas ao mesmo tempo | `TestIndependentWalletsDoNotBlockEachOther`, `TestManyWalletsInParallel` |
+| 4. cenários com três instâncias independentes | `tests/e2e` (três réplicas do Compose) |
+| 5. consumidor interrompido depois do commit e antes da remoção | `TestConsumerCrashAfterCommitBeforeDelete` |
+| 6. dois publishers na mesma outbox, recuperação | `TestOutboxRelayConcurrentPublishersSendEachEventOnce`, `…ReclaimsAnExpiredLease`, `…RepublishesWithTheSameEventID` |
+| 7. `REFUND` antes da referência: resolução e expiração | `internal/app/pending_worker_integration_test.go`; e entre réplicas em `tests/e2e` |
+| 8. reinício preservando idempotência e pendências | `TestRestartPreservesIdempotencyAndPendings` (`tests/e2e`) |
+| HTTP e SQS para a mesma operação | `TestHTTPThenSQSIsOneOperation`, `TestHTTPAndSQSConcurrently`, e `tests/e2e` |
+| saldo × ledger no fim | `assertReconciled` nos testes de integração e e2e; o teste de carga reconcilia todas as carteiras |
+
+Todos rodam com `-race` (`make check`, `make test-integration`).
 
 ## Teste de carga
 
