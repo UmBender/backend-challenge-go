@@ -66,10 +66,37 @@ Cada invariante financeira tem uma constraint, um índice único parcial ou um t
 - Triggers de invariante usam `check_violation` (23514); o do ledger usa `restrict_violation` (23001), para separar "proibido por desenho" de uma checagem que falhou.
 - Os testes de schema criam um banco por teste, aplicam as migrations como `wallet_owner` e executam como `wallet_app`, provando que os privilégios, e não só os triggers, protegem o ledger.
 
+## Transações, locks e concorrência
+
+- `app.TxManager` é o único dono de `BEGIN`/`COMMIT`/`ROLLBACK`; os repositórios recebem a transação corrente. Um caso de uso corresponde a uma transação SQL.
+- `SubmitWager`, em READ COMMITTED:
+  1. `INSERT … ON CONFLICT DO NOTHING`: o índice único decide duplicatas, e uma duplicata concorrente espera a primeira commitar;
+  2. `SELECT … FOR NO KEY UPDATE` na carteira: serializa as escritas da mesma carteira sem conflitar com o `FOR KEY SHARE` que a FK do passo 1 já tomou (com `FOR UPDATE`, duas operações na mesma carteira entrariam em deadlock);
+  3. a referência e o "já estornada?" são lidos depois do lock;
+  4. o domínio decide;
+  5. `UPDATE wallets … WHERE version = $lida`, ledger, transação e outbox; `COMMIT`.
+- Estratégia pessimista por carteira, com as constraints como barreira final (`UNIQUE (wallet_id, wallet_version)`, saldo ≥ 0, estorno único). A ordem dos locks é fixa (entrada no índice de idempotência, depois uma carteira), então não há deadlock; não há lock global, e carteiras diferentes não se bloqueiam.
+- Em READ COMMITTED, a segunda de duas apostas concorrentes acorda já vendo o saldo novo e é rejeitada sem retry. REPEATABLE READ ou SERIALIZABLE a abortariam com `40001`.
+- Nada é commitado como `PENDING` no caminho síncrono. Os retries ficam numa camada só: `ErrConcurrentConflict` repete a transação inteira até 3 vezes, com jitter.
+- Sessões com `lock_timeout = 5s` e `statement_timeout = 15s`; estourar vira `ErrUnavailable` (503).
+- Erros do PostgreSQL são classificados num único lugar: conflito de concorrência (`40001`, `40P01`, `23505` não mapeado) → retry; indisponibilidade (`55P03`, `57014`, `57P0x`, `53300`, classe `08`, rede) → 503; violação de invariante (`23514`, `23503`, `23502`, `23001`, `42501`) → 500. O erro original continua na cadeia para os logs.
+
+## Idempotência
+
+- Escopo por provedor: `(provider_id, idempotency_key)` e `(provider_id, external_transaction_id)` são únicos no banco, nunca em memória.
+- Mesma chave e mesmo hash → replay do resultado armazenado, com o saldo da época; mesma chave e hash diferente → `IDEMPOTENCY_KEY_REUSED`; mesmo external id com outra chave → `EXTERNAL_TRANSACTION_CONFLICT`. Nos conflitos nada se move.
+- Hash: SHA-256 do JSON canônico (chaves ordenadas, compacto, sem escape HTML) de `providerId`, `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`, `money` e `referenceExternalTransactionId` quando presente. A chave e os metadados de transporte ficam de fora, então HTTP e SQS geram o mesmo hash. Não há normalização: a gramática do dinheiro já admite uma única forma por valor.
+
+## Consultas e reconciliação
+
+- Leituras em REPEATABLE READ READ ONLY. O ledger é paginado por keyset em `seq` (1 a 200 itens por página), estável enquanto novos lançamentos chegam.
+- A reconciliação lê o saldo e a soma do ledger no mesmo snapshot. Uma divergência aparece na resposta, num log `WARN` e na métrica `wallet_reconciliation_divergence_total`; a reconciliação nunca escreve, para preservar a evidência.
+- A política de referências pendentes é configurável: `PENDING_REFERENCE_TTL` (15m), `PENDING_MAX_ATTEMPTS` (10), `PENDING_BACKOFF_BASE` (1s), `PENDING_BACKOFF_CAP` (2m), com backoff exponencial e *equal jitter*.
+
 ## Uso do Fx
 
 - `bootstrap.Modules()` é a lista única de módulos, usada pelo `main` e pelos testes. `fx.ValidateApp` valida o grafo sem Docker.
-- Cada pacote expõe um `fx.Module`. Os checks de readiness entram por value group (`health.AsCheck`), então um adapter novo registra o seu check sem alterar `health`.
+- Cada pacote expõe um `fx.Module`; os casos de uso são fornecidos em `bootstrap`, para que `app` não importe Fx. Os checks de readiness entram por value group (`health.AsCheck`), então um adapter novo registra o seu check sem alterar `health`.
 - `config.Module` fornece as sub-structs (`config.HTTP`, `config.Database`...), para que cada construtor dependa só do que usa.
 - A ordem de start e stop vem do grafo: o Fx executa `OnStart` na ordem de construção e `OnStop` ao contrário. O pool do PostgreSQL é construído antes do servidor HTTP, logo fecha depois dele, sem ordenação manual.
 - Só `cmd/`, `bootstrap` e os arquivos de módulo importam Fx; o domínio não importará Fx, pgx, net/http nem AWS.
@@ -121,7 +148,8 @@ Keycloak sobe com o realm `wagering` importado, ainda sem clients. A integraçã
 
 ## Limitações e trabalho não concluído
 
-- Ainda não implementados: idempotência, locks, o worker de referências pendentes, inbox/outbox, autenticação e autorização.
+- Ainda não implementados: API HTTP de negócio, o worker de referências pendentes, a publicação do outbox, o consumidor SQS (inbox), autenticação e autorização.
+- Os testes de concorrência usam goroutines num único processo; a demonstração com três processos ainda não foi feita.
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
 - O `iss` dos tokens difere entre o host (`localhost:8180`) e a rede Docker (`keycloak:8080`); precisa ser resolvido na integração com o IdP.
 - Triggers e privilégios não protegem contra um superusuário do PostgreSQL.
