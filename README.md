@@ -146,6 +146,28 @@ make test-integration  # variáveis não definidas no ambiente vêm do .env.exam
 
 Os testes de banco criam um banco isolado por teste com o superusuário de `TEST_ADMIN_DATABASE_URL`, aplicam as migrations como `wallet_owner` e testam como `wallet_app`. Nunca tocam o banco `wallet` das réplicas.
 
+Os testes de integração usam PostgreSQL, LocalStack e Keycloak reais: cada teste de banco cria seu próprio banco, e os testes de SQS criam filas próprias, removidas no fim.
+
+### Múltiplas instâncias e simulação de falhas
+
+Com a stack completa no ar (`docker compose up --build -d` e as três réplicas `healthy`):
+
+```sh
+make test-e2e   # go test -tags=e2e ./tests/e2e/ contra wallet-1, wallet-2 e wallet-3
+```
+
+Os cenários são caixa-preta, pelos três processos separados, com tokens reais do Keycloak:
+
+- duas apostas de 80 sobre 100 em réplicas diferentes: uma processada, uma `INSUFFICIENT_FUNDS`, saldo 20.00;
+- a mesma aposta 30 vezes em paralelo, distribuída entre as réplicas: um débito só;
+- dez carteiras com dez apostas cada, por todas as réplicas;
+- `REFUND` antes do `BET` em réplicas diferentes, concluído pelo worker de qualquer uma;
+- a mesma operação por HTTP e por SQS: um efeito só;
+- **falha:** `wallet-2` é morta com `SIGKILL` (`docker compose kill -s SIGKILL wallet-2`) no meio da carga; os clientes repetem com a mesma `Idempotency-Key` em outra réplica, cada aposta é aplicada uma única vez, e a réplica é religada no fim;
+- no fim de cada cenário, a reconciliação confirma saldo = ledger; por último, o outbox de todas as réplicas fica vazio.
+
+O cenário de falha usa o `docker` CLI e religa `wallet-2` sozinho. Para repetir manualmente: `docker compose kill -s SIGKILL wallet-2`, depois `docker compose start wallet-2`; para parada graciosa, `docker compose stop wallet-2` (logs mostram a drenagem e exit 0).
+
 ## Problemas comuns
 
 - **`Permission denied` em `/docker-entrypoint-initdb.d` (SELinux):** os bind mounts usam `:z`; mantenha o sufixo.
