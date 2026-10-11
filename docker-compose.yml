@@ -60,8 +60,9 @@ services:
     ports:
       - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4566}:4566"
     healthcheck:
-      # Healthy only after the ready.d scripts (queue creation) completed.
-      test: ["CMD-SHELL", "curl -sf localhost:4566/_localstack/init/ready | grep -q '\"completed\": true'"]
+      # Healthy only after the ready.d scripts (queue creation) completed
+      # without errors.
+      test: ["CMD-SHELL", "s=$$(curl -sf localhost:4566/_localstack/init/ready) && echo \"$$s\" | grep -q '\"completed\": true' && ! echo \"$$s\" | grep -q ERROR"]
       interval: 2s
       timeout: 3s
       retries: 60
