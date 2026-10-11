@@ -157,11 +157,15 @@ Variáveis de ambiente lidas com a stdlib e validadas no start; todos os erros s
 
 LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada redireciona para a DLQ após 5 recebimentos, não usa deduplicação por conteúdo (os produtores enviam ids explícitos) e faz long polling de 20 s. Valores a confirmar junto com o consumidor.
 
-## Autenticação
+## Autenticação e autorização
 
-- Cada rota de negócio declara sua política onde é registrada: `wager:submit` para enviar operações, `wager:read` ou `wallet:admin` para consultar transações, `wallet:admin` para carteiras. O handler só enxerga o `Principal` (client, provedor, papéis), independente de como o token foi validado.
-- Enquanto a validação de JWT não existe, o grafo de produção usa `DenyAll`: toda rota de negócio responde 401, e nenhum endpoint fica aberto entre uma etapa e outra.
-- Keycloak sobe com o realm `wagering` importado, ainda sem clients.
+- IdP: Keycloak, provisionado automaticamente pelo import do realm `wagering`. Comunicação entre serviços com `client_credentials`; o serviço nunca emite tokens nem guarda senhas.
+- Cada provedor é um client confidencial cuja service account tem os papéis `wager:submit` e `wager:read`, e um mapper fixo coloca a claim `provider_id` no token. O serviço interno (`wallet-internal`) tem `wallet:admin`. Um escopo próprio adiciona a audience `wallet-api`.
+- Validação (`JWTAuthenticator`, com `go-oidc`): assinatura contra o JWKS em cache (recarregado quando aparece um `kid` novo), algoritmo fixo RS256, `iss`, `aud = wallet-api` e `exp`. O Keycloak usa um hostname fixo, então o `iss` é o mesmo para tokens pedidos do host ou de dentro da rede; as réplicas buscam as chaves pela rede interna (`OIDC_JWKS_URL`).
+- O `providerId` vem só do token. Um corpo com outro provedor recebe 403; a transação de outro provedor, 404; o namespace de outro provedor, 403. Chaves de idempotência são escopadas por provedor, então reusar a chave de outro provedor nunca revela o resultado dele.
+- Cada rota de negócio declara sua política onde é registrada: `wager:submit` para enviar operações, `wager:read` ou `wallet:admin` para consultar transações, `wallet:admin` para carteiras. O handler só enxerga o `Principal` (client, provedor, papéis).
+- Qualquer falha de autenticação é 401 sem detalhe para o cliente (o motivo vai para o log em debug), e nada é escrito no banco.
+- Testes: unitários com uma chave RSA local (outra chave, HS256, expirado, audience e issuer errados, sem token) e de integração com tokens reais do Keycloak (expirado, sem audience, assinatura adulterada, isolamento entre provedores, rotas de carteira restritas).
 
 ## Imagem e Compose
 
@@ -176,10 +180,11 @@ LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada r
 
 ## Limitações e trabalho não concluído
 
-- Ainda não implementados: validação de JWT com o Keycloak (hoje as rotas de negócio respondem 401), o worker de referências pendentes, a publicação do outbox, o consumidor SQS (inbox).
+- Ainda não implementados: o worker de referências pendentes, a publicação do outbox, o consumidor SQS (inbox).
 - Os testes de concorrência usam goroutines num único processo; a demonstração com três processos ainda não foi feita.
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
-- O `iss` dos tokens difere entre o host (`localhost:8180`) e a rede Docker (`keycloak:8080`); precisa ser resolvido na integração com o IdP.
+- Com o Keycloak fora do ar e sem chaves em cache, as requisições de negócio recebem 401, não 503.
+- O controle de acesso ao broker SQS por credenciais e políticas ainda não foi configurado.
 - Triggers e privilégios não protegem contra um superusuário do PostgreSQL.
 - Reverter a migration `000004` apaga o ledger inteiro.
 - `/metrics` é público na porta da API.
