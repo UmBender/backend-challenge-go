@@ -44,15 +44,37 @@ curl -s localhost:8081/metrics | head
 | `POST /wallets/{walletId}/reconciliation` | serviço interno |
 | `GET /health/live`, `GET /health/ready`, `GET /metrics` | público |
 
-Todas as rotas de negócio exigem um token Bearer. Enquanto a validação de JWT não estiver integrada, elas respondem 401 para qualquer chamada:
+Todas as rotas de negócio exigem um token Bearer emitido pelo Keycloak (`client_credentials`). O realm `wagering` é importado automaticamente com estas identidades de teste (segredos locais, não reais):
+
+| Client | Segredo | Papéis | `provider_id` |
+| --- | --- | --- | --- |
+| `provider-a` | `provider-a-secret` | `wager:submit`, `wager:read` | `provider-a` |
+| `provider-b` | `provider-b-secret` | `wager:submit`, `wager:read` | `provider-b` |
+| `wallet-internal` | `wallet-internal-secret` | `wallet:admin` | — |
+| `provider-a-short-lived` | `provider-a-short-lived-secret` | como `provider-a`, token de 1 s (testes de expiração) | `provider-a` |
+| `other-service` | `other-service-secret` | sem a audience `wallet-api` (testes de rejeição) | — |
+
+Fluxo autenticado (usa `jq`):
 
 ```sh
-curl -s -X POST localhost:8081/wallets -H 'Content-Type: application/json' \
+token() { curl -s -d grant_type=client_credentials -d client_id=$1 -d client_secret=$1-secret \
+  http://localhost:8180/realms/wagering/protocol/openid-connect/token | jq -r .access_token; }
+
+curl -s -X POST localhost:8081/wallets -H "Authorization: Bearer $(token wallet-internal)" \
+  -H 'Content-Type: application/json' \
   -d '{"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","initialBalance":{"amount":"100.00","currency":"BRL"}}'
-# {"type":"about:blank","title":"Unauthorized","status":401,...,"code":"UNAUTHENTICATED",...}
+# {"id":"<walletId>",...,"balance":{"amount":"100.00","currency":"BRL"},"version":1}
+
+curl -s -X POST localhost:8082/wagering/transactions -H "Authorization: Bearer $(token provider-a)" \
+  -H 'Idempotency-Key: provider-a:bet-1' -H 'Content-Type: application/json' \
+  -d '{"providerId":"provider-a","externalTransactionId":"bet-1","playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","walletId":"<walletId>","roundId":"r1","gameId":"g1","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}'
+# 201 {"transactionId":"...","status":"PROCESSED","balance":{"amount":"75.00","currency":"BRL"},"idempotentReplay":false}
+# Repetir o mesmo comando (em qualquer réplica) devolve 200 com "idempotentReplay":true e o mesmo saldo.
 ```
 
-Os fluxos completos (abertura, aposta, replay, pendência, reconciliação e paginação) são exercitados pelo teste de integração `internal/adapters/httpapi/api_integration_test.go`.
+Sem token ou com token inválido/expirado: 401. Provedor chamando `/wallets*`: 403.
+
+Os fluxos completos são exercitados pelos testes de integração `internal/adapters/httpapi/api_integration_test.go` e, com tokens reais do Keycloak, `keycloak_integration_test.go`.
 
 ## Filas
 
@@ -100,7 +122,7 @@ make check             # gofmt + vet + testes com -race
 Integração (build tag `integration`), com a infraestrutura no ar e as variáveis exportadas no mesmo shell:
 
 ```sh
-docker compose up -d postgres localstack migrate
+docker compose up -d postgres localstack keycloak migrate
 set -a; . ./.env.example; set +a
 make test-integration  # go test -tags=integration -race -count=1 ./...
 ```
