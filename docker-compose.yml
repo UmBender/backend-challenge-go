@@ -22,6 +22,8 @@ x-wallet: &wallet
   image: wallet:local
   # Must exceed SHUTDOWN_TIMEOUT, or Docker sends SIGKILL mid-drain.
   stop_grace_period: 30s
+  # A replica that crashes or fails to boot (dependency blip) comes back.
+  restart: on-failure
   depends_on:
     postgres:
       condition: service_healthy

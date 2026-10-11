@@ -3,7 +3,7 @@ MIGRATE  = $(COMPOSE) run --rm migrate -path=/migrations \
 	-database=postgres://wallet_owner:$${WALLET_OWNER_PASSWORD:-wallet_owner}@postgres:5432/wallet?sslmode=disable
 
 .PHONY: help up down down-volumes ps logs migrate-up migrate-down migrate-version \
-	fmt fmt-check vet test test-race test-integration check
+	fmt fmt-check vet test test-race test-integration test-e2e check
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -41,6 +41,7 @@ fmt-check: ## Fail if any Go file is not gofmt-formatted
 vet: ## go vet
 	go vet ./...
 	go vet -tags=integration ./...
+	go vet -tags=e2e ./...
 
 test: ## Unit tests (no Docker needed)
 	go test ./...
@@ -50,5 +51,8 @@ test-race: ## Unit tests with the race detector
 
 test-integration: ## Integration tests; needs the infra running. Unset variables come from .env.example
 	./scripts/with-env-defaults.sh go test -tags=integration -race -count=1 ./...
+
+test-e2e: ## Black-box scenarios against the three replicas; needs `docker compose up --build`
+	./scripts/with-env-defaults.sh go test -tags=e2e -count=1 -v ./tests/e2e/
 
 check: fmt-check vet test-race ## Everything that runs without Docker
