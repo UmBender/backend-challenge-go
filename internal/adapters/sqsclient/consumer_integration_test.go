@@ -228,3 +228,43 @@ func TestConsumerRetriesTransientFailuresUntilTheDLQ(t *testing.T) {
 		return h.pending(h.queues.DLQURL) == 1 && h.pending(h.queues.WagerURL) == 0
 	})
 }
+
+// §13.5: a consumer commits the operation and dies before deleting the
+// message. The message becomes visible again, is redelivered to another
+// consumer and settled as a replay: one debit, nothing in the DLQ.
+func TestConsumerCrashAfterCommitBeforeDelete(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.send(h.message("msg-1", "bet-1", "25.00"))
+
+	// The consumer that crashes: receive, commit, never delete.
+	out, err := h.client.ReceiveMessage(bg, &sqs.ReceiveMessageInput{
+		QueueUrl: aws.String(h.queues.WagerURL), MaxNumberOfMessages: 1, WaitTimeSeconds: 2, VisibilityTimeout: 1,
+	})
+	if err != nil || len(out.Messages) != 1 {
+		t.Fatalf("receive: %v, %d messages", err, len(out.Messages))
+	}
+	cmd, err := parseMessage([]byte(*out.Messages[0].Body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.submitter().Execute(bg, cmd); err != nil {
+		t.Fatal(err)
+	}
+	if n := h.count(`SELECT count(*) FROM wallet_ledger_entries WHERE direction = 'DEBIT'`); n != 1 {
+		t.Fatalf("debits after the first delivery = %d", n)
+	}
+
+	// After the visibility timeout another consumer gets the same message.
+	h.start(h.submitter())
+	h.eventually("redelivered message settled", func() bool { return h.pending(h.queues.WagerURL) == 0 })
+	if n := h.count(`SELECT count(*) FROM wallet_ledger_entries WHERE direction = 'DEBIT'`); n != 1 {
+		t.Fatalf("debits after redelivery = %d, want 1", n)
+	}
+	if n := h.count(`SELECT count(*) FROM inbox_messages WHERE completed_at IS NOT NULL`); n != 1 {
+		t.Fatalf("completed inbox rows = %d, want 1", n)
+	}
+	if n := h.pending(h.queues.DLQURL); n != 0 {
+		t.Fatalf("redelivery went to the DLQ: %d", n)
+	}
+}
