@@ -72,6 +72,8 @@ set -a; . ./.env.example; set +a
 make test-integration  # go test -tags=integration -race -count=1 ./...
 ```
 
+Os testes de banco criam um banco isolado por teste com o superusuário de `TEST_ADMIN_DATABASE_URL`, aplicam as migrations como `wallet_owner` e testam como `wallet_app`. Nunca tocam o banco `wallet` das réplicas.
+
 ## Problemas comuns
 
 - **`Permission denied` em `/docker-entrypoint-initdb.d` (SELinux):** os bind mounts usam `:z`; mantenha o sufixo.
