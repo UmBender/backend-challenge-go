@@ -37,4 +37,17 @@ rm -f "$ATTRS"
 $SQS create-queue --queue-name "$EVENTS_QUEUE" \
     --attributes FifoQueue=true,ContentBasedDeduplication=false >/dev/null
 
+# Resource policies: only the expected principals may use each queue.
+set_policy() {
+	local name="$1" file="$2" url
+	url=$($SQS get-queue-url --queue-name "$name" --query QueueUrl --output text)
+	python3 -c 'import json,sys; print(json.dumps({"Policy": json.dumps(json.load(open(sys.argv[1])))}))' "$file" >"$ATTRS"
+	$SQS set-queue-attributes --queue-url "$url" --attributes "file://${ATTRS}"
+}
+ATTRS=$(mktemp)
+set_policy "$WAGER_QUEUE" /etc/localstack/iam/queue-wager-transactions.json
+set_policy "$DLQ" /etc/localstack/iam/queue-wager-transactions-dlq.json
+set_policy "$EVENTS_QUEUE" /etc/localstack/iam/queue-wallet-events.json
+rm -f "$ATTRS"
+
 echo "SQS queues ready: ${WAGER_QUEUE} (DLQ ${DLQ}, maxReceiveCount ${MAX_RECEIVE_COUNT}), ${EVENTS_QUEUE}"

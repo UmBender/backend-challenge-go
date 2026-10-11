@@ -6,8 +6,10 @@ x-wallet-env: &wallet-env
   DB_MAX_CONNS: ${DB_MAX_CONNS:-10}
   AWS_REGION: us-east-1
   AWS_ENDPOINT_URL: http://localstack:4566
-  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
-  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+  # The wallet-service identity (deploy/localstack/iam/wallet-service.json).
+  # In AWS this is an IAM role, not static keys.
+  AWS_ACCESS_KEY_ID: ${WALLET_AWS_ACCESS_KEY_ID:-wallet-service}
+  AWS_SECRET_ACCESS_KEY: ${WALLET_AWS_SECRET_ACCESS_KEY:-wallet-service-secret}
   SQS_WAGER_QUEUE_NAME: wager-transactions.fifo
   SQS_DLQ_NAME: wager-transactions-dlq.fifo
   SQS_EVENTS_QUEUE_NAME: wallet-events.fifo
@@ -58,10 +60,11 @@ services:
   localstack:
     image: localstack/localstack:4.9
     environment:
-      SERVICES: sqs
+      SERVICES: sqs,iam
       AWS_DEFAULT_REGION: us-east-1
     volumes:
       - ./deploy/localstack/init/ready.d:/etc/localstack/init/ready.d:ro,z
+      - ./deploy/localstack/iam:/etc/localstack/iam:ro,z
     ports:
       - "127.0.0.1:${LOCALSTACK_HOST_PORT:-4566}:4566"
     healthcheck:
