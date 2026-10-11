@@ -55,6 +55,11 @@ type WagerRepo interface {
 	FindByExternalID(ctx context.Context, providerID, externalID string) (*wager.Transaction, error)
 	// A PROCESSED REFUND or ROLLBACK already references id.
 	HasProcessedReversal(ctx context.Context, id uuid.UUID) (bool, error)
+	// ClaimDuePending locks one PENDING_REFERENCE row due at now, skipping
+	// rows other workers hold; (nil, nil) when none is due.
+	ClaimDuePending(ctx context.Context, now time.Time) (*wager.Transaction, error)
+	// GetForUpdate reads and locks one transaction.
+	GetForUpdate(ctx context.Context, id uuid.UUID) (*wager.Transaction, error)
 }
 
 type LedgerRecord struct {

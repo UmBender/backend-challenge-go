@@ -84,6 +84,23 @@ func (r wagerRepo) findOne(ctx context.Context, sql string, args ...any) (*wager
 	return t, err
 }
 
+// ClaimDuePending uses FOR NO KEY UPDATE SKIP LOCKED: two workers never take
+// the same row, and a row stays locked until its decision commits.
+func (r wagerRepo) ClaimDuePending(ctx context.Context, now time.Time) (*wager.Transaction, error) {
+	return r.findOne(ctx, `SELECT `+wagerColumns+` FROM wager_transactions
+		WHERE status = 'PENDING_REFERENCE' AND next_attempt_at <= $1
+		ORDER BY next_attempt_at LIMIT 1
+		FOR NO KEY UPDATE SKIP LOCKED`, now)
+}
+
+func (r wagerRepo) GetForUpdate(ctx context.Context, id uuid.UUID) (*wager.Transaction, error) {
+	t, err := scanWager(r.q.QueryRow(ctx, `SELECT `+wagerColumns+` FROM wager_transactions WHERE id = $1 FOR NO KEY UPDATE`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, app.ErrTransactionNotFound
+	}
+	return t, err
+}
+
 func (r wagerRepo) HasProcessedReversal(ctx context.Context, id uuid.UUID) (bool, error) {
 	var exists bool
 	err := r.q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM wager_transactions
