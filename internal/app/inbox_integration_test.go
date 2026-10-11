@@ -4,6 +4,8 @@ package app_test
 
 import (
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/UmBender/backend-challenge-go/internal/app"
@@ -88,4 +90,52 @@ func TestInboxCompletesAPendingReference(t *testing.T) {
 	if n := e.count(`SELECT count(*) FROM inbox_messages WHERE completed_at IS NOT NULL`); n != 1 {
 		t.Fatal("the message must be completed once the pending state is persisted")
 	}
+}
+
+// §10: the same operation arriving at the same time over HTTP and over SQS
+// (including SQS redeliveries) has exactly one effect.
+func TestHTTPAndSQSConcurrently(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := e.wallet("100.00")
+	bet := e.request(w, wager.KindBet, "25.00", "bet-1", "")
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var fresh atomic.Int32
+	ids := sync.Map{}
+	for i := range 20 {
+		wg.Go(func() {
+			<-start
+			var res app.SubmitResult
+			var err error
+			if i%2 == 0 {
+				res, err = e.submit(bet, "provider-a:bet-1")
+			} else {
+				res, err = e.consume(bet, "provider-a:bet-1", "msg-1")
+			}
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if !res.Replay {
+				fresh.Add(1)
+			}
+			ids.Store(res.Transaction.ID(), true)
+		})
+	}
+	close(start)
+	wg.Wait()
+	distinct := 0
+	ids.Range(func(any, any) bool { distinct++; return true })
+	if fresh.Load() != 1 || distinct != 1 {
+		t.Fatalf("first applications = %d, distinct transactions = %d; want 1 and 1", fresh.Load(), distinct)
+	}
+	if n := e.count(`SELECT count(*) FROM wallet_ledger_entries WHERE direction = 'DEBIT'`); n != 1 {
+		t.Fatalf("debits = %d, want 1", n)
+	}
+	if n := e.count(`SELECT count(*) FROM inbox_messages`); n != 1 {
+		t.Fatalf("inbox rows = %d, want 1", n)
+	}
+	e.assertReconciled(w)
 }
