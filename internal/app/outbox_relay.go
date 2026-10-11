@@ -24,15 +24,16 @@ type OutboxStore interface {
 	// other publishers hold, oldest first.
 	Claim(ctx context.Context, owner string, limit int, lease time.Duration) ([]PendingEvent, error)
 	// MarkPublished and MarkFailed only touch rows still leased to owner.
-	MarkPublished(ctx context.Context, id uuid.UUID, owner string) error
+	MarkPublished(ctx context.Context, ids []uuid.UUID, owner string) error
 	MarkFailed(ctx context.Context, id uuid.UUID, owner string, next time.Time, reason string) error
 	// OldestUnpublished returns the occurred_at of the oldest pending event.
 	OldestUnpublished(ctx context.Context) (time.Time, bool, error)
 }
 
-// EventSender publishes one event to the broker.
+// EventSender publishes events to the broker in order, returning one error
+// per event (nil when sent).
 type EventSender interface {
-	Send(ctx context.Context, e PendingEvent) error
+	Send(ctx context.Context, events []PendingEvent) []error
 }
 
 type OutboxMetrics interface {
@@ -80,22 +81,34 @@ func (r *OutboxRelay) RunOnce(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, e := range batch {
-		if err := r.sender.Send(ctx, e); err != nil {
-			r.metrics.OutboxPublishFailed()
-			next := r.clock.Now().Add(Backoff(e.Attempts+1, r.cfg.BackoffBase, r.cfg.BackoffCap))
-			r.log.WarnContext(ctx, "outbox publish failed", "eventId", e.ID, "attempts", e.Attempts+1, "err", err)
-			if err := r.store.MarkFailed(ctx, e.ID, r.cfg.Owner, next, err.Error()); err != nil {
-				return len(batch), err
-			}
+	if len(batch) == 0 {
+		return 0, nil
+	}
+	// One broker call per 10 events and one UPDATE for the whole batch:
+	// sending events one by one could not keep up with two events per bet.
+	errs := r.sender.Send(ctx, batch)
+	published := make([]uuid.UUID, 0, len(batch))
+	for i, e := range batch {
+		if errs[i] == nil {
+			published = append(published, e.ID)
 			continue
 		}
-		if err := r.store.MarkPublished(ctx, e.ID, r.cfg.Owner); err != nil {
-			// Already sent: the lease expires and the event is sent again
-			// with the same eventId.
+		r.metrics.OutboxPublishFailed()
+		next := r.clock.Now().Add(Backoff(e.Attempts+1, r.cfg.BackoffBase, r.cfg.BackoffCap))
+		r.log.WarnContext(ctx, "outbox publish failed", "eventId", e.ID, "attempts", e.Attempts+1, "err", errs[i])
+		if err := r.store.MarkFailed(ctx, e.ID, r.cfg.Owner, next, errs[i].Error()); err != nil {
 			return len(batch), err
 		}
-		r.metrics.OutboxPublished()
+	}
+	if len(published) > 0 {
+		if err := r.store.MarkPublished(ctx, published, r.cfg.Owner); err != nil {
+			// Already sent: the lease expires and the events are sent again
+			// with the same eventIds.
+			return len(batch), err
+		}
+		for range published {
+			r.metrics.OutboxPublished()
+		}
 	}
 	return len(batch), nil
 }

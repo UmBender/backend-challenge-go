@@ -76,14 +76,16 @@ type countingSender struct {
 	sent map[uuid.UUID]int
 }
 
-func (c *countingSender) Send(ctx context.Context, e app.PendingEvent) error {
-	if err := c.next.Send(ctx, e); err != nil {
-		return err
-	}
+func (c *countingSender) Send(ctx context.Context, events []app.PendingEvent) []error {
+	errs := c.next.Send(ctx, events)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.sent[e.ID]++
-	return nil
+	for i, e := range events {
+		if errs[i] == nil {
+			c.sent[e.ID]++
+		}
+	}
+	return errs
 }
 
 func relayFor(e *env, sender app.EventSender, owner string, batch int) *app.OutboxRelay {
@@ -233,8 +235,8 @@ func TestOutboxRelayRepublishesWithTheSameEventID(t *testing.T) {
 	if err != nil || len(claimed) != 2 {
 		t.Fatalf("claim = %d, %v", len(claimed), err)
 	}
-	for _, ev := range claimed {
-		if err := sender(client, url).Send(ctx, ev); err != nil { // published, never marked
+	for _, err := range sender(client, url).Send(ctx, claimed) { // published, never marked
+		if err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -261,5 +263,25 @@ func TestOutboxRelayRepublishesWithTheSameEventID(t *testing.T) {
 		if _, err := uuid.Parse(dedup); err != nil {
 			t.Fatalf("deduplication id %q is not the eventId", dedup)
 		}
+	}
+}
+
+// A claimed batch larger than the SQS limit of 10 entries per call is split
+// into several calls, and every event is published once.
+func TestOutboxRelaySendsLargeBatchesInChunks(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	client, url := testQueue(t)
+	for range 13 {
+		e.wallet("10.00") // two events each: 26 events
+	}
+	if n, err := relayFor(e, sender(client, url), "relay-1", 50).RunOnce(ctx); err != nil || n != 26 {
+		t.Fatalf("RunOnce = %d, %v", n, err)
+	}
+	if left := e.count(`SELECT count(*) FROM outbox_events WHERE published_at IS NULL`); left != 0 {
+		t.Fatalf("%d events left unpublished", left)
+	}
+	if got := len(drain(t, client, url)); got != 26 {
+		t.Fatalf("messages = %d, want 26", got)
 	}
 }

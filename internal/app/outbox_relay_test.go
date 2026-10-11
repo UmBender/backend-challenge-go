@@ -27,10 +27,10 @@ func (f *fakeOutbox) Claim(_ context.Context, _ string, limit int, _ time.Durati
 	return out, nil
 }
 
-func (f *fakeOutbox) MarkPublished(_ context.Context, id uuid.UUID, _ string) error {
+func (f *fakeOutbox) MarkPublished(_ context.Context, ids []uuid.UUID, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.published = append(f.published, id)
+	f.published = append(f.published, ids...)
 	return nil
 }
 
@@ -47,11 +47,14 @@ func (f *fakeOutbox) OldestUnpublished(context.Context) (time.Time, bool, error)
 
 type fakeSender struct{ fail map[uuid.UUID]bool }
 
-func (s fakeSender) Send(_ context.Context, e PendingEvent) error {
-	if s.fail[e.ID] {
-		return errors.New("broker unavailable")
+func (s fakeSender) Send(_ context.Context, events []PendingEvent) []error {
+	errs := make([]error, len(events))
+	for i, e := range events {
+		if s.fail[e.ID] {
+			errs[i] = errors.New("broker unavailable")
+		}
 	}
-	return nil
+	return errs
 }
 
 type fixedClock struct{ t time.Time }

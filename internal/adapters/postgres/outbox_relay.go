@@ -52,11 +52,15 @@ func (s *OutboxStore) Claim(ctx context.Context, owner string, limit int, lease 
 	return out, nil
 }
 
-func (s *OutboxStore) MarkPublished(ctx context.Context, id uuid.UUID, owner string) error {
+func (s *OutboxStore) MarkPublished(ctx context.Context, ids []uuid.UUID, owner string) error {
+	keys := make([]string, len(ids))
+	for i, id := range ids {
+		keys[i] = id.String()
+	}
 	_, err := s.pool.Exec(ctx, `
 		UPDATE outbox_events
 		   SET published_at = now(), locked_by = NULL, locked_until = NULL, last_error = NULL
-		 WHERE event_id = $1 AND locked_by = $2 AND published_at IS NULL`, id, owner)
+		 WHERE event_id = ANY($1::uuid[]) AND locked_by = $2 AND published_at IS NULL`, keys, owner)
 	return classify(err)
 }
 
