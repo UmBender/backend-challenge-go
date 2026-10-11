@@ -84,6 +84,13 @@ Criadas automaticamente pelo LocalStack na inicialização (`deploy/localstack/i
 - `wager-transactions-dlq.fifo` — DLQ;
 - `wallet-events.fifo` — eventos publicados pelo serviço.
 
+Os eventos são publicados pelo outbox de cada réplica. Para inspecioná-los:
+
+```sh
+docker compose exec localstack awslocal sqs receive-message \
+  --queue-url http://localhost:4566/000000000000/wallet-events.fifo --max-number-of-messages 10
+```
+
 ## Migrations
 
 `golang-migrate`, executado como `wallet_owner` (nunca como o role da aplicação). O Compose aplica as pendentes no `up`.
