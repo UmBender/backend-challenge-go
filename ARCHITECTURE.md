@@ -119,6 +119,17 @@ Cada invariante financeira tem uma constraint, um índice único parcial ou um t
 - O access log registra método, rota, status, duração, correlation id, request id, client e provedor, nunca corpos ou headers.
 - O ledger é paginado com cursor opaco (`base64url` de JSON com o último `seq`), estável enquanto novos lançamentos chegam.
 
+## Outbox e publicação de eventos
+
+- Os eventos são gravados em `outbox_events` na mesma transação da mudança que os causou. Um evento existe se e somente se a mudança foi commitada, então nunca é publicado antes do commit nem perdido depois dele.
+- Toda réplica roda um `OutboxRelay`. A cada ciclo ele reivindica até 50 eventos devidos numa única instrução: `SELECT … FOR UPDATE SKIP LOCKED` dentro de um `UPDATE` que grava o lease (`locked_by`, `locked_until` = 30 s). Publicadores concorrentes pegam lotes disjuntos, e nenhum lock fica aberto enquanto o evento viaja até o broker.
+- Publicação em `wallet-events.fifo` com `MessageGroupId` = carteira (ordem por carteira) e `MessageDeduplicationId` = `eventId`. O payload é o envelope gravado; por ser `jsonb`, os espaços e a ordem das chaves podem diferir, mas o conteúdo é o mesmo.
+- Sucesso: `published_at`, só se a linha ainda pertence ao lease do publicador. Falha: `attempts + 1`, `last_error`, próximo horário com backoff exponencial e jitter (1 s a 1 min) e lease liberado. O evento nunca é descartado; o relay tenta até o broker voltar.
+- Entrega pelo menos uma vez. Se o processo morrer entre o envio e a marcação, o lease expira e outra réplica reenvia o mesmo `eventId`; a deduplicação do SQS absorve reenvios dentro da janela, e os consumidores devem deduplicar por `eventId`. A ordem por carteira é a ordem de `occurred_at` no caminho normal; após uma falha, um evento pode chegar depois de um mais novo, e `walletVersion` permite detectar isso.
+- O dono do lease é `INSTANCE_ID` mais um sufixo aleatório por processo, para que uma réplica reiniciada não feche linhas reivindicadas pela encarnação anterior. No shutdown o loop é cancelado antes do pool fechar.
+- Métricas: `outbox_events_published_total`, `outbox_publish_failures_total` e `outbox_lag_seconds` (idade do evento mais antigo não publicado).
+- Testes de integração com PostgreSQL e LocalStack reais: publicação dos eventos commitados (grupo e deduplicação corretos), dois publicadores concorrentes enviando cada evento exatamente uma vez, broker fora do ar (nada perdido, reagendado e publicado na volta) e lease expirado retomado por outro publicador.
+
 ## Uso do Fx
 
 - `bootstrap.Modules()` é a lista única de módulos, usada pelo `main` e pelos testes. `fx.ValidateApp` valida o grafo sem Docker.
@@ -180,7 +191,7 @@ LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada r
 
 ## Limitações e trabalho não concluído
 
-- Ainda não implementados: o worker de referências pendentes, a publicação do outbox, o consumidor SQS (inbox).
+- Ainda não implementados: o worker de referências pendentes (uma operação em `PENDING_REFERENCE` não é retomada) e o consumidor SQS com inbox.
 - Os testes de concorrência usam goroutines num único processo; a demonstração com três processos ainda não foi feita.
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
 - Com o Keycloak fora do ar e sem chaves em cache, as requisições de negócio recebem 401, não 503.
