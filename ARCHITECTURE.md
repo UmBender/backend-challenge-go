@@ -275,6 +275,24 @@ Variáveis de ambiente lidas com a stdlib e validadas no start; todos os erros s
 
 LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada redireciona para a DLQ após 5 recebimentos, não usa deduplicação por conteúdo (os produtores enviam ids explícitos), tem visibility timeout de 60 s e o consumidor faz long polling de 5 s.
 
+### Controle de acesso ao broker
+
+O §2 pede acesso à mensageria controlado por credenciais e políticas do broker. Cada componente tem uma identidade própria, com menor privilégio, em `deploy/localstack/iam/`:
+
+| Identidade | Pode |
+| --- | --- |
+| `wallet-service` (as réplicas) | resolver as três filas; receber, apagar e mudar a visibilidade na fila de entrada; enviar à DLQ e à fila de eventos |
+| `wager-producer` (provedores) | enviar apenas à fila de entrada |
+| `events-consumer` (consumidores de eventos) | receber e apagar apenas na fila de eventos |
+
+Duas camadas, como na AWS: políticas de identidade (usuários IAM criados por `05-iam.sh`) e queue policies (resource-based) em cada fila, que só admitem os principals esperados. Ninguém tem `PurgeQueue`, `DeleteQueue` ou `SetQueueAttributes`. As réplicas usam a credencial `wallet-service`.
+
+**Limitação:** o LocalStack Community grava essas políticas, mas não as aplica, nem com `ENFORCE_IAM=1` (verificado: uma chave com permissão só de `SendMessage` conseguiu ler a fila). Por isso, a garantia é verificada de dois outros modos:
+- `internal/archtest/broker_policy_test.go` avalia os mesmos arquivos JSON com um avaliador mínimo de IAM (deny explícito vence; allow com wildcards; principal nas queue policies) e compara com a matriz completa: cada identidade × cada ação × cada fila. Uma permissão a mais ou a menos faz o teste falhar;
+- um teste de integração confere que as três filas provisionadas carregam exatamente essas policies.
+
+As validações de domínio continuam no consumidor, como o §2 exige: mesmo uma mensagem enviada por quem não deveria passa por validação estrita, idempotência, inbox e regras de negócio.
+
 ## Autenticação e autorização
 
 - IdP: Keycloak, provisionado automaticamente pelo import do realm `wagering`. Comunicação entre serviços com `client_credentials`; o serviço nunca emite tokens nem guarda senhas.
@@ -302,7 +320,7 @@ LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada r
 
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
 - Com o Keycloak fora do ar e sem chaves em cache, as requisições de negócio recebem 401, não 503.
-- O controle de acesso ao broker SQS por credenciais e políticas ainda não foi configurado.
+- **As políticas do broker não são aplicadas localmente.** Elas estão provisionadas (usuários IAM, políticas de identidade e queue policies), mas o LocalStack Community não as aplica, nem com `ENFORCE_IAM=1`: testei uma chave com permissão só de `SendMessage` e ela conseguiu ler a fila. O menor privilégio é verificado por um teste que avalia as políticas, não pelo broker. Em AWS, as mesmas políticas seriam aplicadas, e as réplicas usariam uma IAM role em vez das chaves estáticas `wallet-service`.
 - Triggers e privilégios não protegem contra um superusuário do PostgreSQL.
 - Reverter a migration `000004` apaga o ledger inteiro.
 - `/metrics` é público na porta da API.

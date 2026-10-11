@@ -93,6 +93,8 @@ docker compose exec localstack awslocal sqs send-message \
   --message-body '{"messageId":"msg-123","type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00.000Z","data":{"providerId":"provider-a","externalTransactionId":"transaction-123","idempotencyKey":"provider-a:transaction-123","playerId":"<playerId>","walletId":"<walletId>","roundId":"round-987","gameId":"fortune-chimp","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}}'
 ```
 
+Cada componente tem uma identidade de menor privilégio no broker (`wallet-service`, `wager-producer`, `events-consumer`), com políticas em `deploy/localstack/iam/`. O LocalStack Community não as aplica; veja o ARCHITECTURE.
+
 Mensagens inválidas ou com erro permanente vão para `wager-transactions-dlq.fifo`; falhas transitórias são repetidas e, após 5 recebimentos, também vão para a DLQ.
 
 Os eventos são publicados pelo outbox de cada réplica. Para inspecioná-los:
