@@ -1,5 +1,5 @@
 // Package httpapi is the HTTP adapter: routing, handlers and the server
-// lifecycle. Business endpoints arrive in T5; T0 serves health and metrics.
+// lifecycle.
 package httpapi
 
 import (
@@ -15,11 +15,14 @@ import (
 	"github.com/UmBender/backend-challenge-go/internal/platform/health"
 )
 
-func NewRouter(readiness *health.Readiness, gatherer prometheus.Gatherer, reg prometheus.Registerer, log *slog.Logger) (http.Handler, error) {
+// NewRouter serves the public health and metrics endpoints and the business
+// routes, each of which authenticates on its own.
+func NewRouter(readiness *health.Readiness, gatherer prometheus.Gatherer, reg prometheus.Registerer, log *slog.Logger, api *API) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", live)
 	mux.Handle("GET /health/ready", ready(readiness, log))
 	mux.Handle("GET /metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
+	api.Register(mux)
 
 	m, err := newHTTPMetrics(reg)
 	if err != nil {

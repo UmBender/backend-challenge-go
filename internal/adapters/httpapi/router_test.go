@@ -29,7 +29,8 @@ func newTestRouter(t *testing.T, checks ...health.Check) (http.Handler, *health.
 	t.Helper()
 	readiness := health.New(checks, time.Second)
 	reg := prometheus.NewRegistry()
-	h, err := NewRouter(readiness, reg, reg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	h, err := NewRouter(readiness, reg, reg, log, &API{Auth: DenyAll{}, Log: log})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -107,5 +108,40 @@ func TestMetricsUseRoutePatternLabels(t *testing.T) {
 	}
 	if !strings.Contains(body, `route="unmatched"`) {
 		t.Fatal("unmatched requests should be grouped under one label")
+	}
+}
+
+// With DenyAll, the production default until JWT validation exists, every
+// business route answers 401 while health stays public.
+func TestBusinessRoutesAreMountedAndDenyByDefault(t *testing.T) {
+	h, _, _ := newTestRouter(t, stubCheck{name: "postgres"})
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/wagering/transactions"},
+		{http.MethodGet, "/wagering/transactions/0192f298-345e-7e38-af88-e43f851a819d"},
+		{http.MethodGet, "/providers/provider-a/wagering/transactions/x"},
+		{http.MethodPost, "/wallets"},
+		{http.MethodGet, "/wallets/0192f291-27dd-7d3f-8071-5f8685deef37"},
+		{http.MethodGet, "/wallets/0192f291-27dd-7d3f-8071-5f8685deef37/ledger"},
+		{http.MethodPost, "/wallets/0192f291-27dd-7d3f-8071-5f8685deef37/reconciliation"},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s = %d, want 401", c.method, c.path, rec.Code)
+		}
+	}
+	if rec := get(t, h, "/health/live"); rec.Code != http.StatusOK {
+		t.Fatalf("health must stay public, got %d", rec.Code)
+	}
+}
+
+// The per-route wrappers must not hide the matched pattern from the metrics.
+func TestBusinessRoutesAreLabelledByPattern(t *testing.T) {
+	h, _, _ := newTestRouter(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/wagering/transactions", nil))
+	body := get(t, h, "/metrics").Body.String()
+	if !strings.Contains(body, `route="POST /wagering/transactions"`) {
+		t.Fatalf("business route not labelled by pattern:\n%s", body)
 	}
 }

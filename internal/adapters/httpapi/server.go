@@ -17,7 +17,12 @@ import (
 // Module provides the router and the server, and forces the server to be
 // built so its lifecycle hooks are registered.
 var Module = fx.Module("httpapi",
-	fx.Provide(NewRouter, NewServer),
+	fx.Provide(
+		NewRouter,
+		NewServer,
+		NewAPI,
+		func() Authenticator { return DenyAll{} },
+	),
 	fx.Invoke(func(*http.Server) {}),
 )
 
