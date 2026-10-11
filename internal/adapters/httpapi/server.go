@@ -21,7 +21,7 @@ var Module = fx.Module("httpapi",
 		NewRouter,
 		NewServer,
 		NewAPI,
-		func() Authenticator { return DenyAll{} },
+		fx.Annotate(NewJWTAuthenticator, fx.As(new(Authenticator))),
 	),
 	fx.Invoke(func(*http.Server) {}),
 )

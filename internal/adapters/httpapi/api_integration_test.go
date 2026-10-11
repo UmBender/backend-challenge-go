@@ -21,7 +21,7 @@ import (
 )
 
 // headerAuth picks a principal by the X-Test-Client header. Test only: the
-// production graph uses DenyAll until JWT validation exists.
+// production graph uses JWTAuthenticator.
 type headerAuth map[string]Principal
 
 func (h headerAuth) Authenticate(r *http.Request) (Principal, error) {

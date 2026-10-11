@@ -33,9 +33,7 @@ type Authenticator interface {
 	Authenticate(r *http.Request) (Principal, error)
 }
 
-// DenyAll refuses every request. The production graph uses it until the JWT
-// verifier exists: business endpoints are never reachable without
-// authentication.
+// DenyAll refuses every request (tests of the public surface).
 type DenyAll struct{}
 
 func (DenyAll) Authenticate(*http.Request) (Principal, error) { return Principal{}, ErrUnauthenticated }

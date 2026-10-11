@@ -90,8 +90,6 @@ func (a *API) wrap(h http.Handler) http.Handler {
 	return withCorrelation(withAccessLog(a.Log, h))
 }
 
-// NewAPI is the Fx constructor. Auth is DenyAll until the JWT verifier is
-// provided in its place.
 func NewAPI(cfg config.HTTP, log *slog.Logger, auth Authenticator, submit *app.SubmitWager, queries *app.Queries,
 	opener *app.OpenWallet, reconciler *app.Reconcile) *API {
 	return &API{

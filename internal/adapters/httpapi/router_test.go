@@ -111,8 +111,8 @@ func TestMetricsUseRoutePatternLabels(t *testing.T) {
 	}
 }
 
-// With DenyAll, the production default until JWT validation exists, every
-// business route answers 401 while health stays public.
+// Without valid credentials every business route answers 401, while health
+// stays public.
 func TestBusinessRoutesAreMountedAndDenyByDefault(t *testing.T) {
 	h, _, _ := newTestRouter(t, stubCheck{name: "postgres"})
 	for _, c := range []struct{ method, path string }{
