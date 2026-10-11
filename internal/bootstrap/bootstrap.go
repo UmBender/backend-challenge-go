@@ -84,7 +84,7 @@ func newOutboxRelay(store app.OutboxStore, sender app.EventSender, clock app.Clo
 func newConsumer(client *sqs.Client, queues *sqsclient.Queues, submit *app.SubmitWager, log *slog.Logger, m *metrics.AppMetrics) *sqsclient.Consumer {
 	return sqsclient.NewConsumer(client, queues, submit, log, sqsclient.ConsumerConfig{
 		Concurrency:    4,
-		WaitTime:       20,
+		WaitTime:       5,
 		ProcessTimeout: 10 * time.Second,
 		RetryBase:      2 * time.Second,
 		RetryCap:       30 * time.Second,

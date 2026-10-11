@@ -84,7 +84,11 @@ func (c *Consumer) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	for ctx.Err() == nil {
-		out, err := c.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+		// The long poll is not cancelled by ctx: the broker may still hand
+		// messages to a request cut short, and they would stay invisible
+		// until the visibility timeout. It ends within WaitTime instead, and
+		// whatever it returns after shutdown began is released.
+		out, err := c.client.ReceiveMessage(context.WithoutCancel(ctx), &sqs.ReceiveMessageInput{
 			QueueUrl: aws.String(c.inputURL()), MaxNumberOfMessages: 10, WaitTimeSeconds: c.cfg.WaitTime,
 			MessageSystemAttributeNames: []types.MessageSystemAttributeName{
 				types.MessageSystemAttributeNameMessageGroupId, types.MessageSystemAttributeNameApproximateReceiveCount,
@@ -97,6 +101,10 @@ func (c *Consumer) Run(ctx context.Context) {
 			c.log.WarnContext(ctx, "receive failed", "err", err)
 			sleep(ctx, time.Second)
 			continue
+		}
+		if ctx.Err() != nil {
+			c.release(out.Messages)
+			return
 		}
 		for _, group := range byGroup(out.Messages) {
 			select {
