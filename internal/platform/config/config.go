@@ -32,6 +32,8 @@ type HTTP struct {
 	WriteTimeout      time.Duration
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
+	// Bounds each business request, database calls included.
+	RequestTimeout time.Duration
 }
 
 type Database struct {
@@ -90,6 +92,7 @@ func Load(lookup LookupFunc) (Config, error) {
 			WriteTimeout:      r.duration("HTTP_WRITE_TIMEOUT", 30*time.Second),
 			IdleTimeout:       r.duration("HTTP_IDLE_TIMEOUT", 60*time.Second),
 			ShutdownTimeout:   r.duration("HTTP_SHUTDOWN_TIMEOUT", 10*time.Second),
+			RequestTimeout:    r.duration("HTTP_REQUEST_TIMEOUT", 10*time.Second),
 		},
 		Database: Database{
 			URL:      r.required("DATABASE_URL"),
@@ -135,6 +138,8 @@ func Load(lookup LookupFunc) (Config, error) {
 	r.check(cfg.Pending.MaxAttempts >= 1, "PENDING_MAX_ATTEMPTS must be at least 1")
 	r.check(cfg.Pending.BackoffBase <= cfg.Pending.BackoffCap,
 		"PENDING_BACKOFF_BASE must not exceed PENDING_BACKOFF_CAP")
+	r.check(cfg.HTTP.RequestTimeout < cfg.HTTP.WriteTimeout,
+		"HTTP_REQUEST_TIMEOUT must be shorter than HTTP_WRITE_TIMEOUT so the error response can still be written")
 	r.check(cfg.HTTP.ShutdownTimeout < cfg.StopTimeout,
 		"HTTP_SHUTDOWN_TIMEOUT must be shorter than SHUTDOWN_TIMEOUT so the HTTP drain fits in the stop budget")
 

@@ -155,3 +155,15 @@ func TestLoadRejectsInvalidPendingPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadRequestTimeout(t *testing.T) {
+	cfg, err := Load(env(minimal()))
+	if err != nil || cfg.HTTP.RequestTimeout != 10*time.Second {
+		t.Fatalf("default request timeout = %v, %v; want 10s", cfg.HTTP.RequestTimeout, err)
+	}
+	values := minimal()
+	values["HTTP_REQUEST_TIMEOUT"] = "40s"
+	if _, err := Load(env(values)); err == nil || !strings.Contains(err.Error(), "HTTP_REQUEST_TIMEOUT must be shorter than HTTP_WRITE_TIMEOUT") {
+		t.Fatalf("err = %v", err)
+	}
+}
