@@ -46,8 +46,11 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
     healthcheck:
-      # Checks the application database, which exists only after initdb ran.
-      test: ["CMD-SHELL", "pg_isready -U postgres -d wallet"]
+      # Over TCP on purpose: during initdb the entrypoint runs a temporary
+      # server on the Unix socket only, then restarts it. A socket check
+      # would report healthy before that restart and the migrate job would
+      # hit the restart window.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d wallet"]
       interval: 2s
       timeout: 3s
       retries: 30
