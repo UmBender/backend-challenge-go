@@ -58,3 +58,4 @@ func (r repos) Wallets() app.WalletRepo { return walletRepo{q: r.q} }
 func (r repos) Wagers() app.WagerRepo   { return wagerRepo{q: r.q} }
 func (r repos) Ledger() app.LedgerRepo  { return ledgerRepo{q: r.q} }
 func (r repos) Outbox() app.OutboxRepo  { return outboxRepo{q: r.q} }
+func (r repos) Inbox() app.InboxRepo    { return inboxRepo{q: r.q} }

@@ -26,6 +26,7 @@ type Repos interface {
 	Wagers() WagerRepo
 	Ledger() LedgerRepo
 	Outbox() OutboxRepo
+	Inbox() InboxRepo
 }
 
 type WalletRepo interface {
@@ -92,6 +93,21 @@ type IDs interface{ New() uuid.UUID }
 type SystemClock struct{}
 
 func (SystemClock) Now() time.Time { return time.Now().UTC() }
+
+// InboxEntry is a consumed message as recorded by a previous delivery.
+type InboxEntry struct {
+	PayloadHash   []byte
+	TransactionID uuid.UUID
+}
+
+// InboxRepo records consumed messages in the transaction of their effects.
+type InboxRepo interface {
+	// Claim records the message; if (consumer, messageID) already exists it
+	// returns the stored entry instead. A concurrent delivery waits on the
+	// primary key until the first one commits.
+	Claim(ctx context.Context, consumer, messageID string, hash []byte, now time.Time) (*InboxEntry, error)
+	Complete(ctx context.Context, consumer, messageID string, transactionID uuid.UUID, now time.Time) error
+}
 
 // Time-ordered UUIDs keep B-tree inserts append-mostly.
 type UUIDv7 struct{}

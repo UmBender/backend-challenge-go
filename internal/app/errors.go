@@ -21,5 +21,7 @@ var (
 	ErrUnavailable = errors.New("dependency unavailable")
 	// The database refused a write the domain should never produce: a bug, 500,
 	// never retried.
+	// Same messageId, different payload: the message is poisoned (DLQ).
+	ErrMessageReused      = errors.New("message id reused with a different payload")
 	ErrInvariantViolation = errors.New("invariant violation")
 )

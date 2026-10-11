@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"time"
 
@@ -18,6 +19,14 @@ type SubmitCommand struct {
 	// Not part of the payload hash.
 	CorrelationID string
 	CausationID   string
+	// Inbox is set by the SQS consumer: the message is recorded in the same
+	// transaction as its effects, and a redelivery replays the stored result.
+	Inbox *InboxMessage
+}
+
+type InboxMessage struct {
+	Consumer  string
+	MessageID string
 }
 
 // SubmitResult carries the stored outcome and whether the call was a replay.
@@ -75,8 +84,11 @@ func (u *SubmitWager) Execute(ctx context.Context, cmd SubmitCommand) (SubmitRes
 	if cmd.CorrelationID == "" {
 		cmd.CorrelationID = cmd.IdempotencyKey
 	}
+	// The inbox hash covers the business payload and the key, so a messageId
+	// reused for anything else is detected.
+	inboxHash := sha256.Sum256(append(bytes.Clone(hash), cmd.IdempotencyKey...))
 	for attempt := 1; ; attempt++ {
-		res, err := u.once(ctx, cmd, hash)
+		res, err := u.once(ctx, cmd, hash, inboxHash[:])
 		if err == nil || !errors.Is(err, ErrConcurrentConflict) || attempt == conflictRetries {
 			return res, err
 		}
@@ -89,7 +101,7 @@ func (u *SubmitWager) Execute(ctx context.Context, cmd SubmitCommand) (SubmitRes
 	}
 }
 
-func (u *SubmitWager) once(ctx context.Context, cmd SubmitCommand, hash []byte) (SubmitResult, error) {
+func (u *SubmitWager) once(ctx context.Context, cmd SubmitCommand, hash, inboxHash []byte) (SubmitResult, error) {
 	now := u.clock.Now()
 	tx, err := wager.NewExternal(u.ids.New(), cmd.Request, cmd.IdempotencyKey, hash, now)
 	if err != nil {
@@ -97,13 +109,30 @@ func (u *SubmitWager) once(ctx context.Context, cmd SubmitCommand, hash []byte) 
 	}
 	var res SubmitResult
 	err = u.tx.WithinTx(ctx, func(ctx context.Context, r Repos) error {
+		if cmd.Inbox != nil {
+			seen, err := r.Inbox().Claim(ctx, cmd.Inbox.Consumer, cmd.Inbox.MessageID, inboxHash, now)
+			if err != nil {
+				return err
+			}
+			if seen != nil {
+				if !bytes.Equal(seen.PayloadHash, inboxHash) {
+					return ErrMessageReused
+				}
+				// Redelivery of a completed message: replay, no new effect.
+				stored, err := r.Wagers().Get(ctx, seen.TransactionID)
+				res = SubmitResult{Transaction: stored, Replay: true}
+				return err
+			}
+		}
 		inserted, err := r.Wagers().InsertIfAbsent(ctx, tx)
 		if err != nil {
 			return err
 		}
 		if !inserted {
-			res, err = existing(ctx, r, cmd, hash)
-			return err
+			if res, err = existing(ctx, r, cmd, hash); err != nil {
+				return err
+			}
+			return completeInbox(ctx, r, cmd, res.Transaction, now)
 		}
 		w, err := r.Wallets().GetForUpdate(ctx, cmd.Request.WalletID)
 		if err != nil {
@@ -129,9 +158,16 @@ func (u *SubmitWager) once(ctx context.Context, cmd SubmitCommand, hash []byte) 
 			return err
 		}
 		res = SubmitResult{Transaction: tx}
-		return nil
+		return completeInbox(ctx, r, cmd, tx, now)
 	})
 	return res, err
+}
+
+func completeInbox(ctx context.Context, r Repos, cmd SubmitCommand, tx *wager.Transaction, now time.Time) error {
+	if cmd.Inbox == nil {
+		return nil
+	}
+	return r.Inbox().Complete(ctx, cmd.Inbox.Consumer, cmd.Inbox.MessageID, tx.ID(), now)
 }
 
 // existing looks up the key first: it identifies the request. Only a new
