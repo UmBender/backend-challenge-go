@@ -31,6 +31,29 @@ curl -s localhost:8081/health/live
 curl -s localhost:8081/metrics | head
 ```
 
+## Endpoints
+
+| Método e rota | Quem pode chamar |
+| --- | --- |
+| `POST /wagering/transactions` (header `Idempotency-Key` obrigatório) | provedor |
+| `GET /wagering/transactions/{transactionId}` | provedor dono da transação, serviço interno |
+| `GET /providers/{providerId}/wagering/transactions/{externalTransactionId}` | o próprio provedor, serviço interno |
+| `POST /wallets` | serviço interno |
+| `GET /wallets/{walletId}` | serviço interno |
+| `GET /wallets/{walletId}/ledger?limit=&cursor=` | serviço interno |
+| `POST /wallets/{walletId}/reconciliation` | serviço interno |
+| `GET /health/live`, `GET /health/ready`, `GET /metrics` | público |
+
+Todas as rotas de negócio exigem um token Bearer. Enquanto a validação de JWT não estiver integrada, elas respondem 401 para qualquer chamada:
+
+```sh
+curl -s -X POST localhost:8081/wallets -H 'Content-Type: application/json' \
+  -d '{"playerId":"0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1","initialBalance":{"amount":"100.00","currency":"BRL"}}'
+# {"type":"about:blank","title":"Unauthorized","status":401,...,"code":"UNAUTHENTICATED",...}
+```
+
+Os fluxos completos (abertura, aposta, replay, pendência, reconciliação e paginação) são exercitados pelo teste de integração `internal/adapters/httpapi/api_integration_test.go`.
+
 ## Filas
 
 Criadas automaticamente pelo LocalStack na inicialização (`deploy/localstack/init/ready.d/10-queues.sh`):
