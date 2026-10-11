@@ -210,12 +210,13 @@ LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada r
 
 ## Testes
 
-- `go test ./...`: config, logging, health, router, ciclo de vida do servidor HTTP e validação do grafo Fx, sem Docker.
-- `make test-integration` (build tag `integration`): a aplicação completa contra PostgreSQL e SQS reais — start, readiness verde, stop com pool fechado e porta liberada, e falha no start quando uma fila não existe.
+- `go test ./...` (sem Docker): dinheiro (com fuzz), domínio e máquina de estados, regras de arquitetura (sem float, domínio sem infraestrutura), config, HTTP (mapeamento de erros, decodificação estrita, autorização, JWT com chave local), relay do outbox e parsing de mensagens SQS.
+- `make test-integration` (build tag `integration`, PostgreSQL, LocalStack e Keycloak reais): constraints e triggers por SQLSTATE, casos de uso e concorrência (goroutines com barreira de largada), HTTP de ponta a ponta, tokens reais, outbox, worker de pendências, consumidor SQS e o ciclo de vida da aplicação completa. Um banco isolado por teste.
+- `make test-e2e` (build tag `e2e`): cenários caixa-preta contra as três réplicas do Compose, que são processos separados, incluindo uma réplica morta com `SIGKILL` sob carga. Cada cenário termina com a reconciliação saldo × ledger.
+- O ensaio de entrega é feito a partir de um clone limpo: `docker compose up --build`, depois `make check`, `make test-integration` e `make test-e2e`. Foi esse ensaio que revelou o script de filas sem permissão de execução e o healthcheck do PostgreSQL que passava durante o initdb, ambos corrigidos.
 
 ## Limitações e trabalho não concluído
 
-- Os testes de concorrência usam goroutines num único processo; a demonstração com três processos ainda não foi feita.
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
 - Com o Keycloak fora do ar e sem chaves em cache, as requisições de negócio recebem 401, não 503.
 - O controle de acesso ao broker SQS por credenciais e políticas ainda não foi configurado.
@@ -223,5 +224,7 @@ LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada r
 - Reverter a migration `000004` apaga o ledger inteiro.
 - `/metrics` é público na porta da API.
 - Readiness inclui o SQS, como pede o enunciado: com o SQS fora, a réplica fica *not ready* mesmo podendo atender HTTP.
-- Sem `restart:` nas réplicas: uma falha transitória no boot deixa a réplica parada.
+- As réplicas usam `restart: on-failure` (voltam após falha de boot ou crash); um `docker kill` manual não é reiniciado pelo Docker.
+- Não há injeção de falha dentro do processo (por exemplo, morrer exatamente entre o commit e a remoção da mensagem). Esses pontos são cobertos pelos efeitos equivalentes: reentrega de mensagem já commitada, lease de outbox expirado e réplica morta com `SIGKILL`.
+- Não há teste de carga com medição de latência (p50/p95/p99).
 - Imagens fixadas por tag, não por digest.
