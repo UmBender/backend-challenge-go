@@ -169,6 +169,15 @@ Os cenários são caixa-preta, pelos três processos separados, com tokens reais
 - **falha:** `wallet-2` é morta com `SIGKILL` (`docker compose kill -s SIGKILL wallet-2`) no meio da carga; os clientes repetem com a mesma `Idempotency-Key` em outra réplica, cada aposta é aplicada uma única vez, e a réplica é religada no fim;
 - no fim de cada cenário, a reconciliação confirma saldo = ledger; por último, o outbox de todas as réplicas fica vazio.
 
+### Teste de carga
+
+```sh
+make test-load   # 60 s, 32 clientes, três réplicas; relatório em Markdown no fim
+go run ./cmd/loadtest -duration 30s -workers 16 -wallets 20 -dup-ratio 0.1 -hot-ratio 0.2
+```
+
+Relata throughput, latência p50/p95/p99, status, erros, duplicatas, conflitos e atraso da outbox, e termina reconciliando todas as carteiras. Resultados e metodologia: [ARCHITECTURE.md](ARCHITECTURE.md#teste-de-carga).
+
 O cenário de falha usa o `docker` CLI e religa `wallet-2` sozinho. Para repetir manualmente: `docker compose kill -s SIGKILL wallet-2`, depois `docker compose start wallet-2`; para parada graciosa, `docker compose stop wallet-2` (logs mostram a drenagem e exit 0).
 
 ## Problemas comuns

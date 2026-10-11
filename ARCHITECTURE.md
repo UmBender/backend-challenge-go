@@ -201,8 +201,8 @@ Os resultados de uma operação (processada, pendente, rejeitada) usam o corpo d
 
 - Os eventos são gravados em `outbox_events` na mesma transação da mudança que os causou. Um evento existe se e somente se a mudança foi commitada, então nunca é publicado antes do commit nem perdido depois dele.
 - Toda réplica roda um `OutboxRelay`. A cada ciclo ele reivindica até 50 eventos devidos numa única instrução: `SELECT … FOR UPDATE SKIP LOCKED` dentro de um `UPDATE` que grava o lease (`locked_by`, `locked_until` = 30 s). Publicadores concorrentes pegam lotes disjuntos, e nenhum lock fica aberto enquanto o evento viaja até o broker.
-- Publicação em `wallet-events.fifo` com `MessageGroupId` = carteira (ordem por carteira) e `MessageDeduplicationId` = `eventId`. O payload é o envelope gravado; por ser `jsonb`, os espaços e a ordem das chaves podem diferir, mas o conteúdo é o mesmo.
-- Sucesso: `published_at`, só se a linha ainda pertence ao lease do publicador. Falha: `attempts + 1`, `last_error`, próximo horário com backoff exponencial e jitter (1 s a 1 min) e lease liberado. O evento nunca é descartado; o relay tenta até o broker voltar.
+- Publicação em `wallet-events.fifo` com `SendMessageBatch` (até 10 eventos por chamada; dentro de um lote o SQS mantém a ordem de cada grupo), `MessageGroupId` = carteira (ordem por carteira) e `MessageDeduplicationId` = `eventId`. Os eventos enviados são marcados numa única instrução por lote. O teste de carga mostrou que enviar um a um não acompanhava a produção de eventos. O payload é o envelope gravado; por ser `jsonb`, os espaços e a ordem das chaves podem diferir, mas o conteúdo é o mesmo.
+- Sucesso: `published_at`, só nas linhas que ainda pertencem ao lease do publicador. Uma falha parcial do lote afeta só os eventos que falharam. Falha: `attempts + 1`, `last_error`, próximo horário com backoff exponencial e jitter (1 s a 1 min) e lease liberado. O evento nunca é descartado; o relay tenta até o broker voltar.
 - Entrega pelo menos uma vez. Se o processo morrer entre o envio e a marcação, o lease expira e outra réplica reenvia o mesmo `eventId`; a deduplicação do SQS absorve reenvios dentro da janela, e os consumidores devem deduplicar por `eventId`. A ordem por carteira é a ordem de `occurred_at` no caminho normal; após uma falha, um evento pode chegar depois de um mais novo, e `walletVersion` permite detectar isso.
 - O dono do lease é `INSTANCE_ID` mais um sufixo aleatório por processo, para que uma réplica reiniciada não feche linhas reivindicadas pela encarnação anterior. No shutdown o loop é cancelado antes do pool fechar.
 - Métricas: `outbox_events_published_total`, `outbox_publish_failures_total` e `outbox_lag_seconds` (idade do evento mais antigo não publicado).
@@ -316,6 +316,39 @@ As validações de domínio continuam no consumidor, como o §2 exige: mesmo uma
 - `make test-e2e` (build tag `e2e`): cenários caixa-preta contra as três réplicas do Compose, que são processos separados, incluindo uma réplica morta com `SIGKILL` sob carga e todas as réplicas mortas e religadas com uma operação já processada e outra pendente. Cada cenário termina com a reconciliação saldo × ledger.
 - O ensaio de entrega é feito a partir de um clone limpo: `docker compose up --build`, depois `make check`, `make test-integration` e `make test-e2e`. Foi esse ensaio que revelou o script de filas sem permissão de execução e o healthcheck do PostgreSQL que passava durante o initdb, ambos corrigidos.
 
+## Teste de carga
+
+**Comando:** `make test-load`, com a stack no ar (`docker compose up --build -d`). Equivale a `go run ./cmd/loadtest -duration 60s -workers 32`; as flags permitem mudar a duração, os workers, as carteiras, a fração de reenvios e a de carteira quente.
+
+**Ambiente:** um notebook (Intel i5-8250U, 4 núcleos / 8 threads, 7 GiB de RAM, Fedora 44, Docker 29.7.2) rodando **tudo junto**: PostgreSQL, LocalStack, Keycloak, as três réplicas (pool de 10 conexões cada) e o próprio gerador de carga. Os números valem como referência relativa, não como capacidade de produção.
+
+**Metodologia:**
+- abre 50 carteiras e mais uma "quente";
+- 32 clientes concorrentes enviam `BET`s de 1.00 por HTTP, com tokens reais do Keycloak, em rodízio entre as três réplicas, por 60 s;
+- 20% das apostas novas vão para a carteira quente, para gerar disputa pelo lock;
+- 10% das requisições reenviam uma operação já processada, com a mesma chave, para medir duplicatas;
+- a latência é medida no cliente; conflitos, duplicatas e outbox vêm das métricas Prometheus das réplicas (diferença entre antes e depois); o atraso da outbox é amostrado a cada segundo;
+- no fim, espera a outbox esvaziar e reconcilia todas as carteiras, conferindo também se cada saldo é igual ao inicial menos as apostas aceitas.
+
+**Resultado (60 s, 32 workers):**
+
+| Item | Valor |
+| --- | --- |
+| Throughput | 18.347 requisições em 60,4 s → **303,7 req/s** (273,2 apostas novas/s) |
+| Latência | p50 34,1 ms · p95 477,5 ms · p99 1.065,5 ms · máx 4.735,2 ms |
+| Status | 201: 16.508 · 200 (replay): 1.839 |
+| Erros | 0 (nenhuma resposta fora de 2xx e nenhum erro de transporte) |
+| Duplicatas | 1.839 respondidas como replay, igual à métrica do servidor |
+| Conflitos de concorrência | 0 |
+| Outbox | 33.056 eventos publicados · atraso máximo 4,77 s · vazia 0,8 s após o fim da carga |
+| Integridade | 51/51 carteiras consistentes e com o saldo esperado |
+
+Os números variam entre execuções nesta máquina compartilhada: uma segunda rodada, feita logo depois dos suítes de integração e e2e num clone limpo, deu 186,1 req/s, p95 781,9 ms e p99 1.826,8 ms. Também teve zero erros, atraso máximo da outbox de 6,0 s e fila vazia 1,1 s depois, com 51/51 carteiras íntegras. O que se mantém entre execuções é a ausência de erros, a integridade financeira e a outbox acompanhando a carga.
+
+**Leitura:**
+- Zero conflitos é esperado: o lock pessimista por carteira faz a disputa virar **espera** (e latência), não `40001`. A cauda (p95/p99) vem principalmente da carteira quente, que recebe 20% das apostas e é serializada. Carteiras diferentes seguem em paralelo.
+- A primeira medição revelou a outbox como gargalo: com um `SendMessage` e um `UPDATE` por evento, o publicador não acompanhava os dois eventos de cada aposta (atraso de 49 s, e a fila ainda não tinha esvaziado 2 min depois da carga, com 204 req/s). Com `SendMessageBatch` (10 por chamada) e uma única marcação por lote, o atraso caiu para 4,8 s, a fila passou a esvaziar em menos de 1 s, e o throughput subiu 49%, porque sobrou CPU para a API na mesma máquina.
+
 ## Limitações e trabalho não concluído
 
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
@@ -327,5 +360,5 @@ As validações de domínio continuam no consumidor, como o §2 exige: mesmo uma
 - Readiness inclui o SQS, como pede o enunciado: com o SQS fora, a réplica fica *not ready* mesmo podendo atender HTTP.
 - As réplicas usam `restart: on-failure` (voltam após falha de boot ou crash); um `docker kill` manual não é reiniciado pelo Docker.
 - Não há injeção de falha dentro do processo (por exemplo, morrer exatamente entre o commit e a remoção da mensagem). Esses pontos são cobertos pelos efeitos equivalentes: reentrega de mensagem já commitada, lease de outbox expirado e réplica morta com `SIGKILL`.
-- Não há teste de carga com medição de latência (p50/p95/p99).
+- O teste de carga roda numa única máquina, junto com toda a infraestrutura; não representa a capacidade de produção.
 - Imagens fixadas por tag, não por digest.
