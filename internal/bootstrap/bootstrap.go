@@ -47,8 +47,12 @@ var appModule = fx.Module("app",
 		app.NewQueries,
 		app.NewReconcile,
 		newOutboxRelay,
+		app.NewPendingWorker,
 	),
-	fx.Invoke(runOutboxRelay),
+	fx.Invoke(
+		func(lc fx.Lifecycle, r *app.OutboxRelay) { runInBackground(lc, r.Run) },
+		func(lc fx.Lifecycle, w *app.PendingWorker) { runInBackground(lc, w.Run) },
+	),
 )
 
 // Conservative fixed values: a lease far above one SQS send, small batches,
@@ -67,17 +71,18 @@ func newOutboxRelay(store app.OutboxStore, sender app.EventSender, clock app.Clo
 	})
 }
 
-// runOutboxRelay starts after the pool and the queues (its dependencies) and
-// stops before them. Stopping cancels the loop; an event sent but not yet
-// marked is sent again later with the same eventId.
-func runOutboxRelay(lc fx.Lifecycle, relay *app.OutboxRelay) {
+// runInBackground runs a worker loop after its dependencies started and
+// stops it before they stop. Cancelling only interrupts the current
+// iteration: its transaction rolls back, or an event sent but not yet marked
+// is sent again later with the same eventId.
+func runInBackground(lc fx.Lifecycle, run func(context.Context)) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	lc.Append(fx.Hook{
 		OnStart: func(context.Context) error {
 			go func() {
 				defer close(done)
-				relay.Run(ctx)
+				run(ctx)
 			}()
 			return nil
 		},
