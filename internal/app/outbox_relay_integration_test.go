@@ -217,3 +217,49 @@ func TestOutboxRelayReclaimsAnExpiredLease(t *testing.T) {
 		t.Fatalf("messages = %d, want 2", got)
 	}
 }
+
+// §11: a publisher sends the events and dies before marking them published.
+// After the lease expires another publisher sends them again with the same
+// eventId; SQS FIFO deduplication drops the copies, and consumers deduplicate
+// on eventId beyond its window.
+func TestOutboxRelayRepublishesWithTheSameEventID(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	client, url := testQueue(t)
+	e.wallet("100.00")
+
+	store := postgres.NewOutboxStore(e.pool)
+	claimed, err := store.Claim(ctx, "dead-relay", 10, 300*time.Millisecond)
+	if err != nil || len(claimed) != 2 {
+		t.Fatalf("claim = %d, %v", len(claimed), err)
+	}
+	for _, ev := range claimed {
+		if err := sender(client, url).Send(ctx, ev); err != nil { // published, never marked
+			t.Fatal(err)
+		}
+	}
+
+	time.Sleep(400 * time.Millisecond)
+	counter := &countingSender{next: sender(client, url), sent: map[uuid.UUID]int{}}
+	if n, err := relayFor(e, counter, "relay-2", 10).RunOnce(ctx); err != nil || n != 2 {
+		t.Fatalf("RunOnce after lease expiry = %d, %v", n, err)
+	}
+	for _, ev := range claimed {
+		if counter.sent[ev.ID] != 1 {
+			t.Fatalf("event %s was not republished with its original eventId: %v", ev.ID, counter.sent)
+		}
+	}
+	if left := e.count(`SELECT count(*) FROM outbox_events WHERE published_at IS NULL`); left != 0 {
+		t.Fatalf("%d events left unpublished", left)
+	}
+	msgs := drain(t, client, url)
+	if len(msgs) != 2 {
+		t.Fatalf("messages = %d, want 2 (the copies are deduplicated by eventId)", len(msgs))
+	}
+	for _, m := range msgs {
+		dedup := m.Attributes[string(types.MessageSystemAttributeNameMessageDeduplicationId)]
+		if _, err := uuid.Parse(dedup); err != nil {
+			t.Fatalf("deduplication id %q is not the eventId", dedup)
+		}
+	}
+}
