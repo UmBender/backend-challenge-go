@@ -41,6 +41,7 @@ var moneyPaths = []string{
 	"../domain",
 	"../app",
 	"../adapters/postgres",
+	"../adapters/httpapi",
 }
 
 // Guarantee 1 of §5: no float32/float64 on money paths.
