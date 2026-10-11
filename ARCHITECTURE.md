@@ -93,6 +93,32 @@ Cada invariante financeira tem uma constraint, um índice único parcial ou um t
 - A reconciliação lê o saldo e a soma do ledger no mesmo snapshot. Uma divergência aparece na resposta, num log `WARN` e na métrica `wallet_reconciliation_divergence_total`; a reconciliação nunca escreve, para preservar a evidência.
 - A política de referências pendentes é configurável: `PENDING_REFERENCE_TTL` (15m), `PENDING_MAX_ATTEMPTS` (10), `PENDING_BACKOFF_BASE` (1s), `PENDING_BACKOFF_CAP` (2m), com backoff exponencial e *equal jitter*.
 
+## Contrato HTTP
+
+- Roteamento com o `ServeMux` da stdlib. Cada rota de negócio é envolvida individualmente (correlation id, access log, timeout, autorização), então o padrão casado chega às métricas e ao log e as rotas públicas continuam públicas por construção.
+- Corpo JSON lido de forma estrita: um único objeto, nomes exatos, sem duplicatas nem campos desconhecidos, limite de tamanho, `Content-Type: application/json`, UUIDs só na forma canônica e dinheiro como string. `Idempotency-Key` é obrigatório no envio de operações.
+- O `providerId` vem do token; um corpo com outro provedor recebe 403 `PROVIDER_MISMATCH`. A transação de outro provedor é respondida com 404, para não confirmar que o id existe.
+- Erros seguem a RFC 9457 (`application/problem+json`), com o membro `code` como contrato estável e o `correlationId`. Um único ponto (`writeError`) converte erros em respostas:
+
+| Situação | Status | `code` / `failureCode` |
+| --- | --- | --- |
+| operação processada / replay | 201 / 200 (`idempotentReplay: true`, saldo da época) | — |
+| aguardando referência | 202 + `Location` | — |
+| rejeição de negócio (inclusive em replay) | 422 | `failureCode` do domínio |
+| falha permanente registrada pelo worker | 500 | `PROCESSING_FAILED` |
+| corpo, campo ou dinheiro inválido; `OPENING` vindo de fora | 400 | `INVALID_REQUEST`, `INVALID_MONEY`, `UNSUPPORTED_KIND`... |
+| `Content-Type` errado / corpo grande demais | 415 / 413 | `UNSUPPORTED_MEDIA_TYPE` / `PAYLOAD_TOO_LARGE` |
+| sem token ou token inválido | 401 | `UNAUTHENTICATED` |
+| papel ausente / provedor divergente | 403 | `FORBIDDEN` / `PROVIDER_MISMATCH` |
+| carteira ou transação inexistente | 404 | `WALLET_NOT_FOUND` / `TRANSACTION_NOT_FOUND` |
+| chave reutilizada / external id com outra chave / carteira duplicada | 409 | `IDEMPOTENCY_KEY_REUSED` / `EXTERNAL_TRANSACTION_CONFLICT` / `WALLET_ALREADY_EXISTS` |
+| indisponibilidade transitória, conflito esgotado, timeout | 503 + `Retry-After` | `SERVICE_UNAVAILABLE` |
+| bug ou violação de invariante | 500 | `INTERNAL_ERROR` (detalhe só no log) |
+
+- Cada requisição de negócio tem `HTTP_REQUEST_TIMEOUT` (10 s, menor que o write timeout); o prazo chega ao banco pelo context.
+- O access log registra método, rota, status, duração, correlation id, request id, client e provedor, nunca corpos ou headers.
+- O ledger é paginado com cursor opaco (`base64url` de JSON com o último `seq`), estável enquanto novos lançamentos chegam.
+
 ## Uso do Fx
 
 - `bootstrap.Modules()` é a lista única de módulos, usada pelo `main` e pelos testes. `fx.ValidateApp` valida o grafo sem Docker.
@@ -133,7 +159,9 @@ LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada r
 
 ## Autenticação
 
-Keycloak sobe com o realm `wagering` importado, ainda sem clients. A integração (clients, validação de JWT, autorização por provedor) ainda não foi implementada.
+- Cada rota de negócio declara sua política onde é registrada: `wager:submit` para enviar operações, `wager:read` ou `wallet:admin` para consultar transações, `wallet:admin` para carteiras. O handler só enxerga o `Principal` (client, provedor, papéis), independente de como o token foi validado.
+- Enquanto a validação de JWT não existe, o grafo de produção usa `DenyAll`: toda rota de negócio responde 401, e nenhum endpoint fica aberto entre uma etapa e outra.
+- Keycloak sobe com o realm `wagering` importado, ainda sem clients.
 
 ## Imagem e Compose
 
@@ -148,7 +176,7 @@ Keycloak sobe com o realm `wagering` importado, ainda sem clients. A integraçã
 
 ## Limitações e trabalho não concluído
 
-- Ainda não implementados: API HTTP de negócio, o worker de referências pendentes, a publicação do outbox, o consumidor SQS (inbox), autenticação e autorização.
+- Ainda não implementados: validação de JWT com o Keycloak (hoje as rotas de negócio respondem 401), o worker de referências pendentes, a publicação do outbox, o consumidor SQS (inbox).
 - Os testes de concorrência usam goroutines num único processo; a demonstração com três processos ainda não foi feita.
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
 - O `iss` dos tokens difere entre o host (`localhost:8180`) e a rede Docker (`keycloak:8080`); precisa ser resolvido na integração com o IdP.
