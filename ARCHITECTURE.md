@@ -53,6 +53,19 @@ deploy/              initdb do PostgreSQL, filas do LocalStack, realm do Keycloa
 
 Um tipo Go por evento, com interface selada; tipo e versão vêm do payload. O `aggregateId` de todos é a carteira, o que dá ordem por carteira na fila FIFO. O envelope é imutável, e `MarshalJSON` falha com `Money` inválido, então um evento quebrado nunca é gravado. `eventId`, correlação, causa e `occurredAt` (UTC) vêm da aplicação.
 
+## Schema e imutabilidade
+
+Cada invariante financeira tem uma constraint, um índice único parcial ou um trigger no banco, além da regra no domínio. Os testes de integração verificam cada uma pelo SQLSTATE.
+
+- `wallets`: `balance_minor >= 0`, `version >= 1`, `UNIQUE (player_id, currency)`. Um trigger exige versão + 1 se e somente se o saldo muda, e congela a identidade.
+- `wager_transactions`: forma interna × externa (`OPENING` sem metadados de provedor; externas com chave, hash SHA-256, rodada e jogo), política de zero, referência obrigatória em estornos e proibida em `BET`/`LOSS`/`OPENING`, código de falha apenas em `REJECTED`/`FAILED`. Índices únicos parciais: `(provider_id, external_transaction_id)`, `(provider_id, idempotency_key)`, uma `OPENING` por carteira e um estorno `PROCESSED` por referência. Um trigger impede mudanças em estados terminais, volta a `PENDING` e alteração dos campos de identidade e do hash.
+- `wallet_ledger_entries`: aritmética conferida por linha, valor positivo, `UNIQUE (wallet_id, transaction_id)` e `UNIQUE (wallet_id, wallet_version)`, que transforma uma atualização perdida em violação de unicidade. FKs compostas garantem a moeda da carteira e uma transação da mesma carteira; `seq` serve à paginação.
+- Ledger append-only em duas camadas: `wallet_app` só tem `SELECT, INSERT`, e triggers bloqueiam `UPDATE`/`DELETE`/`TRUNCATE` para todos exceto superusuários, inclusive o dono que roda as migrations.
+- `inbox_messages`: PK `(consumer_name, message_id)` e hash do payload. `outbox_events`: o envelope é imutável; só os campos de entrega mudam, e uma linha publicada é final.
+- Grants explícitos por tabela: `wallet_app` tem `SELECT, INSERT, UPDATE` nas demais tabelas e nenhum `DELETE`/`TRUNCATE`; não há `ALTER DEFAULT PRIVILEGES`.
+- Triggers de invariante usam `check_violation` (23514); o do ledger usa `restrict_violation` (23001), para separar "proibido por desenho" de uma checagem que falhou.
+- Os testes de schema criam um banco por teste, aplicam as migrations como `wallet_owner` e executam como `wallet_app`, provando que os privilégios, e não só os triggers, protegem o ledger.
+
 ## Uso do Fx
 
 - `bootstrap.Modules()` é a lista única de módulos, usada pelo `main` e pelos testes. `fx.ValidateApp` valida o grafo sem Docker.
@@ -108,9 +121,11 @@ Keycloak sobe com o realm `wagering` importado, ainda sem clients. A integraçã
 
 ## Limitações e trabalho não concluído
 
-- Ainda não implementados: schema de negócio, idempotência, locks, o worker de referências pendentes, inbox/outbox, autenticação e autorização.
+- Ainda não implementados: idempotência, locks, o worker de referências pendentes, inbox/outbox, autenticação e autorização.
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
 - O `iss` dos tokens difere entre o host (`localhost:8180`) e a rede Docker (`keycloak:8080`); precisa ser resolvido na integração com o IdP.
+- Triggers e privilégios não protegem contra um superusuário do PostgreSQL.
+- Reverter a migration `000004` apaga o ledger inteiro.
 - `/metrics` é público na porta da API.
 - Readiness inclui o SQS, como pede o enunciado: com o SQS fora, a réplica fica *not ready* mesmo podendo atender HTTP.
 - Sem `restart:` nas réplicas: uma falha transitória no boot deixa a réplica parada.
