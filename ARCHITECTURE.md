@@ -49,6 +49,15 @@ deploy/              initdb do PostgreSQL, filas do LocalStack, realm do Keycloa
 - Referência `REJECTED`/`FAILED` → `REFERENCE_NOT_PROCESSED`; atributos divergentes (provedor, jogador, carteira, moeda, rodada) → `REFERENCE_MISMATCH`; tipo errado → `REFERENCE_KIND_INVALID`; valor diferente → `REFERENCE_AMOUNT_MISMATCH`.
 - No máximo um estorno bem-sucedido por transação, de qualquer tipo; uma segunda tentativa recebe `ALREADY_REVERSED`. Não há estorno parcial.
 
+### Worker de referências pendentes
+
+- Toda réplica roda um `PendingWorker`. Ele reivindica uma linha `PENDING_REFERENCE` vencida por vez com `FOR NO KEY UPDATE SKIP LOCKED`, trava a carteira, relê a referência e aplica a mesma decisão do domínio, persistindo pelo mesmo caminho do `SubmitWager`, tudo numa transação. Dois workers nunca processam a mesma linha, e a ordem de locks é a do caminho síncrono (linha da transação, depois carteira).
+- O estado da espera (`attempts`, `next_attempt_at`, `expires_at`) está na linha, não em memória: qualquer réplica retoma o trabalho de outra, inclusive de uma que morreu.
+- Sem referência: reagenda com backoff exponencial e jitter (`PENDING_BACKOFF_BASE` a `PENDING_BACKOFF_CAP`), sem novo evento. Expirado o TTL ou o número máximo de tentativas: `REJECTED` com `REFERENCE_NOT_FOUND` e o evento de rejeição.
+- Uma falha permanente que não é de negócio grava `FAILED` (`PROCESSING_FAILED`) em outra transação, para não reprocessar a linha para sempre; falhas transitórias apenas tentam de novo.
+- A espera é por polling (1 s quando não há trabalho), sem acordar o estorno quando a referência chega: a latência extra é de no máximo um intervalo de backoff.
+- Testes de integração: `REFUND` antes do `BET` processado pelo worker (saldo, eventos, reconciliação), reagendamento e expiração por TTL, e dois workers concorrentes sobre dez carteiras sem processamento duplicado.
+
 ## Eventos
 
 Um tipo Go por evento, com interface selada; tipo e versão vêm do payload. O `aggregateId` de todos é a carteira, o que dá ordem por carteira na fila FIFO. O envelope é imutável, e `MarshalJSON` falha com `Money` inválido, então um evento quebrado nunca é gravado. `eventId`, correlação, causa e `occurredAt` (UTC) vêm da aplicação.
@@ -191,7 +200,7 @@ LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada r
 
 ## Limitações e trabalho não concluído
 
-- Ainda não implementados: o worker de referências pendentes (uma operação em `PENDING_REFERENCE` não é retomada) e o consumidor SQS com inbox.
+- Ainda não implementado: o consumidor SQS com inbox.
 - Os testes de concorrência usam goroutines num único processo; a demonstração com três processos ainda não foi feita.
 - Interpretações adotadas: `WIN` com referência ausente espera, como `REFUND`/`ROLLBACK`; `WIN` contra uma aposta já estornada recebe `ALREADY_REVERSED`; `BET` e `LOSS` com referência são rejeitados com 400; `ROLLBACK` de um `REFUND` é permitido, mas a aposta não pode ser estornada de novo.
 - Com o Keycloak fora do ar e sem chaves em cache, as requisições de negócio recebem 401, não 503.
