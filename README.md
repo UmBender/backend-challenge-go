@@ -84,6 +84,17 @@ Criadas automaticamente pelo LocalStack na inicialização (`deploy/localstack/i
 - `wager-transactions-dlq.fifo` — DLQ;
 - `wallet-events.fifo` — eventos publicados pelo serviço.
 
+Enviar uma operação pela fila (o mesmo caso de uso do HTTP; `MessageGroupId` = carteira, `MessageDeduplicationId` = `messageId`):
+
+```sh
+docker compose exec localstack awslocal sqs send-message \
+  --queue-url http://localhost:4566/000000000000/wager-transactions.fifo \
+  --message-group-id <walletId> --message-deduplication-id msg-123 \
+  --message-body '{"messageId":"msg-123","type":"WagerTransactionRequested","occurredAt":"2026-09-08T12:00:00.000Z","data":{"providerId":"provider-a","externalTransactionId":"transaction-123","idempotencyKey":"provider-a:transaction-123","playerId":"<playerId>","walletId":"<walletId>","roundId":"round-987","gameId":"fortune-chimp","kind":"BET","money":{"amount":"25.00","currency":"BRL"}}}'
+```
+
+Mensagens inválidas ou com erro permanente vão para `wager-transactions-dlq.fifo`; falhas transitórias são repetidas e, após 5 recebimentos, também vão para a DLQ.
+
 Os eventos são publicados pelo outbox de cada réplica. Para inspecioná-los:
 
 ```sh
