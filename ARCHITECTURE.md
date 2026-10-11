@@ -141,7 +141,7 @@ Cada invariante financeira tem uma constraint, um índice único parcial ou um t
 
 ## Consumidor SQS e inbox
 
-- Toda réplica consome `wager-transactions.fifo` com long polling de 20 s e até 10 mensagens por vez. Mensagens do mesmo `MessageGroupId` são processadas em ordem; grupos diferentes, em paralelo (até 4).
+- Toda réplica consome `wager-transactions.fifo` com long polling de 5 s e até 10 mensagens por vez. Mensagens do mesmo `MessageGroupId` são processadas em ordem; grupos diferentes, em paralelo (até 4).
 - O envelope do §10 é lido de forma estrita (campos desconhecidos rejeitados, UUIDs canônicos, dinheiro como string) e vira o mesmo `SubmitCommand` do HTTP, com a chave `data.idempotencyKey`: validação, hash e garantias financeiras são as do caminho HTTP.
 - A inbox `(consumer_name, message_id)` é gravada e concluída na mesma transação SQL das mudanças de domínio, do ledger e dos eventos. Uma reentrega encontra a linha concluída e responde com o resultado armazenado, sem novo efeito; o mesmo `messageId` com outro conteúdo (hash do payload e da chave) é permanente e vai para a DLQ. Uma operação enviada por HTTP e depois por SQS é um replay. Uma referência pendente conclui a mensagem assim que a pendência é persistida; o worker continua a partir daí.
 - A mensagem só é removida depois do commit. Se o processo morrer entre o commit e a remoção, a reentrega é um replay.
@@ -150,9 +150,9 @@ Cada invariante financeira tem uma constraint, um índice único parcial ou um t
   - mensagem malformada, request inválido, chave reutilizada, external id com outra chave, carteira inexistente, `messageId` reutilizado ou violação de invariante → encaminha explicitamente para `wager-transactions-dlq.fifo` (com o motivo em `failureReason`) e remove;
   - indisponibilidade, conflito esgotado, timeout ou erro desconhecido → torna a mensagem visível de novo com backoff (2 s a 30 s), sem processar as seguintes do mesmo grupo; após `maxReceiveCount = 5` recebimentos a política de redrive leva a mensagem para a DLQ.
 - Limites: visibility timeout de 60 s na fila e 10 s por mensagem no processamento, então uma mensagem nunca é reentregue enquanto ainda está sendo tratada.
-- `SIGTERM`: para de buscar mensagens, conclui as que estão em andamento (sem cancelá-las) e libera a visibilidade das que ainda não começaram.
+- `SIGTERM`: para de buscar mensagens, conclui as que estão em andamento (sem cancelá-las) e libera a visibilidade das que ainda não começaram. O long poll em andamento não é cancelado: o broker ainda poderia entregar mensagens a uma requisição abandonada, e elas ficariam invisíveis até o visibility timeout. Ele termina em até 5 s, e o que chegar depois do início do shutdown é liberado na hora. Os testes e2e encontraram esse caso: uma mensagem enviada logo após um restart ficava parada 60 s.
 - Produtores: `MessageGroupId` = `walletId` (ordem por carteira) e `MessageDeduplicationId` = `messageId`; a deduplicação do SQS cobre 5 minutos, e a inbox cobre o resto.
-- Testes de integração com LocalStack e PostgreSQL: processamento e remoção, reentrega com um único efeito, rejeição de negócio removida sem DLQ, mensagens malformadas na DLQ sem nenhuma transação criada, falha transitória persistente levada à DLQ pelo redrive; no nível do caso de uso, `messageId` reutilizado, HTTP seguido de SQS e referência pendente.
+- Testes de integração com LocalStack e PostgreSQL: processamento e remoção, reentrega com um único efeito, rejeição de negócio removida sem DLQ, mensagens malformadas na DLQ sem nenhuma transação criada, falha transitória persistente levada à DLQ pelo redrive, e um consumidor que morre depois do commit e antes da remoção (a mensagem volta e é concluída como replay, com um débito só); no nível do caso de uso, `messageId` reutilizado, HTTP seguido de SQS e referência pendente.
 
 ## Uso do Fx
 
@@ -176,8 +176,22 @@ Variáveis de ambiente lidas com a stdlib e validadas no start; todos os erros s
 
 - `GET /health/live` não consulta dependências: uma oscilação do banco não deve reiniciar todas as réplicas.
 - `GET /health/ready` executa os checks de PostgreSQL e SQS em paralelo, com 1 s de timeout cada. A resposta diz apenas `ok`/`unavailable`; o erro detalhado vai para o log.
-- Logs JSON (`log/slog`), sempre com `service` e `instanceId`. Os eventos internos do Fx saem no mesmo formato.
-- Métricas Prometheus em `/metrics`, com registry dedicado. `http_request_duration_seconds` usa como label o padrão da rota (`GET /wallets/{walletId}`), nunca o caminho bruto, para limitar a cardinalidade.
+- Logs JSON (`log/slog`), sempre com `service` e `instanceId`. Cada operação registra `correlationId`, `transactionId`, `walletId`, `providerId`, o status e se foi replay; o consumidor acrescenta `messageId`. O access log tem método, rota, status, duração, correlation id, request id, client e provedor. Corpos, headers, tokens e saldos nunca vão para o log. Os eventos internos do Fx saem no mesmo formato.
+- Métricas Prometheus em `/metrics`, com registry dedicado e labels de cardinalidade limitada:
+
+| Métrica | O que mede |
+| --- | --- |
+| `wager_operations_total{origin,result}` | resultados por origem (`http`, `sqs`, `worker`) e status (`PROCESSED`, `REJECTED`, `PENDING_REFERENCE`, `FAILED`) ou classe de erro |
+| `wager_duplicates_total{origin}` | repetições respondidas com o resultado armazenado |
+| `wager_processing_duration_seconds{origin}` | latência de processamento, retries incluídos |
+| `wager_concurrency_conflicts_total` | transações repetidas após conflito detectado pelo banco |
+| `wager_pending_reference_retries_total` | buscas de referência que reagendaram a operação |
+| `sqs_messages_total{outcome}` | mensagens `processed`, `dlq` (encaminhadas) e `retry` (visíveis de novo) |
+| `outbox_events_published_total`, `outbox_publish_failures_total`, `outbox_lag_seconds` | publicação e atraso da outbox |
+| `wallet_reconciliation_divergence_total` | divergências de reconciliação |
+| `http_request_duration_seconds{route,method,code}` | latência HTTP por padrão de rota, nunca pelo caminho bruto |
+
+- Mensagens movidas para a DLQ pelo redrive da fila (tentativas esgotadas) não passam pelo consumidor; elas aparecem como `sqs_messages_total{outcome="retry"}` antes e na profundidade da DLQ no broker.
 
 ## PostgreSQL e migrations
 
@@ -190,7 +204,7 @@ Variáveis de ambiente lidas com a stdlib e validadas no start; todos os erros s
 
 ## Mensageria
 
-LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada redireciona para a DLQ após 5 recebimentos, não usa deduplicação por conteúdo (os produtores enviam ids explícitos), tem visibility timeout de 60 s e faz long polling de 20 s.
+LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada redireciona para a DLQ após 5 recebimentos, não usa deduplicação por conteúdo (os produtores enviam ids explícitos), tem visibility timeout de 60 s e o consumidor faz long polling de 5 s.
 
 ## Autenticação e autorização
 
@@ -212,7 +226,7 @@ LocalStack com três filas FIFO, criadas na inicialização. A fila de entrada r
 
 - `go test ./...` (sem Docker): dinheiro (com fuzz), domínio e máquina de estados, regras de arquitetura (sem float, domínio sem infraestrutura), config, HTTP (mapeamento de erros, decodificação estrita, autorização, JWT com chave local), relay do outbox e parsing de mensagens SQS.
 - `make test-integration` (build tag `integration`, PostgreSQL, LocalStack e Keycloak reais): constraints e triggers por SQLSTATE, casos de uso e concorrência (goroutines com barreira de largada), HTTP de ponta a ponta, tokens reais, outbox, worker de pendências, consumidor SQS e o ciclo de vida da aplicação completa. Um banco isolado por teste.
-- `make test-e2e` (build tag `e2e`): cenários caixa-preta contra as três réplicas do Compose, que são processos separados, incluindo uma réplica morta com `SIGKILL` sob carga. Cada cenário termina com a reconciliação saldo × ledger.
+- `make test-e2e` (build tag `e2e`): cenários caixa-preta contra as três réplicas do Compose, que são processos separados, incluindo uma réplica morta com `SIGKILL` sob carga e todas as réplicas mortas e religadas com uma operação já processada e outra pendente. Cada cenário termina com a reconciliação saldo × ledger.
 - O ensaio de entrega é feito a partir de um clone limpo: `docker compose up --build`, depois `make check`, `make test-integration` e `make test-e2e`. Foi esse ensaio que revelou o script de filas sem permissão de execução e o healthcheck do PostgreSQL que passava durante o initdb, ambos corrigidos.
 
 ## Limitações e trabalho não concluído
