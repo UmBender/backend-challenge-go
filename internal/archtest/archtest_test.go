@@ -39,6 +39,8 @@ func TestFloatCheckerDetectsEveryKnownTrap(t *testing.T) {
 // moneyPaths grows as adapters that parse, persist or serialize money are added.
 var moneyPaths = []string{
 	"../domain",
+	"../app",
+	"../adapters/postgres",
 }
 
 // Guarantee 1 of §5: no float32/float64 on money paths.
