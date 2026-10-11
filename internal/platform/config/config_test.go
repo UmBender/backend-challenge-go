@@ -167,3 +167,23 @@ func TestLoadRequestTimeout(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestLoadAuth(t *testing.T) {
+	cfg, err := Load(env(minimal()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Auth{
+		Issuer:   "http://localhost:8180/realms/wagering",
+		JWKSURL:  "http://localhost:8180/realms/wagering/protocol/openid-connect/certs",
+		Audience: "wallet-api",
+	}
+	if cfg.Auth != want {
+		t.Fatalf("auth = %+v, want %+v", cfg.Auth, want)
+	}
+	values := minimal()
+	values["OIDC_JWKS_URL"] = "keycloak/certs"
+	if _, err := Load(env(values)); err == nil || !strings.Contains(err.Error(), "OIDC_JWKS_URL must be an absolute URL") {
+		t.Fatalf("err = %v", err)
+	}
+}

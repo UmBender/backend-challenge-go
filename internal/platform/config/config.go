@@ -23,6 +23,7 @@ type Config struct {
 	AWS      AWS
 	SQS      SQS
 	Pending  Pending
+	Auth     Auth
 }
 
 type HTTP struct {
@@ -56,6 +57,14 @@ type SQS struct {
 	WagerQueueName  string
 	DLQName         string
 	EventsQueueName string
+}
+
+// Auth configures access-token validation. The JWKS URL may differ from the
+// issuer's host: replicas fetch keys inside the network, while iss is fixed.
+type Auth struct {
+	Issuer   string
+	JWKSURL  string
+	Audience string
 }
 
 // Pending schedules operations waiting for a reference (§7): retried with
@@ -107,6 +116,10 @@ func Load(lookup LookupFunc) (Config, error) {
 			DLQName:         r.str("SQS_DLQ_NAME", "wager-transactions-dlq.fifo"),
 			EventsQueueName: r.str("SQS_EVENTS_QUEUE_NAME", "wallet-events.fifo"),
 		},
+		Auth: Auth{
+			Issuer:   r.str("OIDC_ISSUER", "http://localhost:8180/realms/wagering"),
+			Audience: r.str("OIDC_AUDIENCE", "wallet-api"),
+		},
 		Pending: Pending{
 			TTL:         r.duration("PENDING_REFERENCE_TTL", 15*time.Minute),
 			MaxAttempts: int(r.int32("PENDING_MAX_ATTEMPTS", 10)),
@@ -134,6 +147,11 @@ func Load(lookup LookupFunc) (Config, error) {
 		"SQS_EVENTS_QUEUE_NAME": cfg.SQS.EventsQueueName,
 	} {
 		r.check(strings.HasSuffix(name, ".fifo"), key+" must name a FIFO queue (suffix .fifo)")
+	}
+	cfg.Auth.JWKSURL = r.str("OIDC_JWKS_URL", strings.TrimSuffix(cfg.Auth.Issuer, "/")+"/protocol/openid-connect/certs")
+	for key, raw := range map[string]string{"OIDC_ISSUER": cfg.Auth.Issuer, "OIDC_JWKS_URL": cfg.Auth.JWKSURL} {
+		u, err := url.Parse(raw)
+		r.check(err == nil && u.Scheme != "" && u.Host != "", key+" must be an absolute URL")
 	}
 	r.check(cfg.Pending.MaxAttempts >= 1, "PENDING_MAX_ATTEMPTS must be at least 1")
 	r.check(cfg.Pending.BackoffBase <= cfg.Pending.BackoffCap,

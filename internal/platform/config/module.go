@@ -11,5 +11,6 @@ var Module = fx.Module("config",
 		func(c Config) AWS { return c.AWS },
 		func(c Config) SQS { return c.SQS },
 		func(c Config) Pending { return c.Pending },
+		func(c Config) Auth { return c.Auth },
 	),
 )

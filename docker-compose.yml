@@ -13,6 +13,9 @@ x-wallet-env: &wallet-env
   SQS_EVENTS_QUEUE_NAME: wallet-events.fifo
   SHUTDOWN_TIMEOUT: 25s
   HTTP_SHUTDOWN_TIMEOUT: 10s
+  OIDC_ISSUER: http://localhost:${KEYCLOAK_HOST_PORT:-8180}/realms/wagering
+  OIDC_JWKS_URL: http://keycloak:8080/realms/wagering/protocol/openid-connect/certs
+  OIDC_AUDIENCE: wallet-api
 
 x-wallet: &wallet
   build: .
