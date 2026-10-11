@@ -58,9 +58,64 @@ deploy/              initdb do PostgreSQL, filas do LocalStack, realm do Keycloa
 - A espera é por polling (1 s quando não há trabalho), sem acordar o estorno quando a referência chega: a latência extra é de no máximo um intervalo de backoff.
 - Testes de integração: `REFUND` antes do `BET` processado pelo worker (saldo, eventos, reconciliação), reagendamento e expiração por TTL, e dois workers concorrentes sobre dez carteiras sem processamento duplicado.
 
+### Códigos de falha
+
+Os valores são parte do contrato público e nunca mudam de nome.
+
+| Código | Tipo | HTTP | Quando |
+| --- | --- | --- | --- |
+| `INVALID_REQUEST` | corrigível, nada é gravado | 400 | campo ausente, vazio, longo demais ou de tipo errado; tipo desconhecido; referência em `BET`/`LOSS`, ausente em `REFUND`/`ROLLBACK` ou apontando para a própria operação |
+| `INVALID_MONEY` | corrigível | 400 | valor fora da gramática, negativo, com escala errada, overflow ou moeda não suportada |
+| `UNSUPPORTED_KIND` | corrigível | 400 | `OPENING` vindo de HTTP ou SQS (reservado à abertura interna) |
+| `MISSING_IDEMPOTENCY_KEY` | corrigível | 400 | header `Idempotency-Key` ausente ou vazio |
+| `INVALID_AMOUNT_FOR_KIND` | corrigível | 400 | `LOSS` diferente de `0.00`, ou valor zero nos demais tipos |
+| `INSUFFICIENT_FUNDS` | definitivo, gravado como `REJECTED` | 422 | `BET` maior que o saldo |
+| `REVERSAL_INSUFFICIENT_FUNDS` | definitivo | 422 | `ROLLBACK` que precisaria debitar mais que o saldo |
+| `CURRENCY_MISMATCH` | definitivo | 422 | moeda da operação diferente da carteira |
+| `WALLET_PLAYER_MISMATCH` | definitivo | 422 | jogador da operação diferente do dono da carteira |
+| `REFERENCE_NOT_FOUND` | definitivo | 422 | referência não chegou dentro do TTL ou das tentativas |
+| `REFERENCE_NOT_PROCESSED` | definitivo | 422 | referência `REJECTED`/`FAILED`, ou existente mas nunca concluída no prazo |
+| `REFERENCE_MISMATCH` | definitivo | 422 | provedor, jogador, carteira, moeda ou rodada diferentes da referência |
+| `REFERENCE_KIND_INVALID` | definitivo | 422 | tipo de referência não reversível pela operação |
+| `REFERENCE_AMOUNT_MISMATCH` | definitivo | 422 | valor diferente do referenciado (sem estorno parcial) |
+| `ALREADY_REVERSED` | definitivo | 422 | a referência já tem um estorno processado |
+| `PROCESSING_FAILED` | falha permanente, gravada como `FAILED` | 500 | erro que não é de negócio, registrado só pelo worker para auditoria |
+
+Os códigos corrigíveis vêm só da validação do request e não gravam nada, então a mesma chave pode ser reenviada depois de corrigir o corpo. Os definitivos são gravados, e um replay devolve a mesma rejeição.
+
 ## Eventos
 
 Um tipo Go por evento, com interface selada; tipo e versão vêm do payload. O `aggregateId` de todos é a carteira, o que dá ordem por carteira na fila FIFO. O envelope é imutável, e `MarshalJSON` falha com `Money` inválido, então um evento quebrado nunca é gravado. `eventId`, correlação, causa e `occurredAt` (UTC) vêm da aplicação.
+
+Contrato de consumo da fila `wallet-events.fifo`:
+
+```json
+{
+  "eventId": "01a128b7-2e38-70e2-9581-2305a54bbcaf",
+  "eventType": "WalletBalanceChanged",
+  "version": 1,
+  "aggregateId": "<walletId>",
+  "correlationId": "provider-a:transaction-123",
+  "causationId": "<requestId ou messageId>",
+  "occurredAt": "2026-09-08T12:00:00.123456Z",
+  "data": {
+    "walletId": "<walletId>", "transactionId": "<transactionId>", "direction": "DEBIT",
+    "money": {"amount": "25.00", "currency": "BRL"},
+    "balanceBefore": {"amount": "1000.00", "currency": "BRL"},
+    "balanceAfter": {"amount": "975.00", "currency": "BRL"},
+    "walletVersion": 2
+  }
+}
+```
+
+| `eventType` | `data` |
+| --- | --- |
+| `WagerTransactionProcessed` | `transactionId`, `walletId`, `playerId`, `kind`, `money`, `balance`, `walletVersion`; para operações externas também `providerId`, `externalTransactionId`, `roundId`, `gameId` e `referenceTransactionId` quando houver |
+| `WagerTransactionRejected` | `transactionId`, `walletId`, `playerId`, `kind`, `money`, `providerId`, `externalTransactionId`, `failureCode` |
+| `WalletBalanceChanged` | `walletId`, `transactionId`, `direction`, `money`, `balanceBefore`, `balanceAfter`, `walletVersion` |
+| `WagerTransactionPendingReference` | `transactionId`, `walletId`, `playerId`, `kind`, `money`, `providerId`, `externalTransactionId`, `referenceExternalTransactionId`, `expiresAt` |
+
+Roteamento: `MessageGroupId` = `aggregateId` (ordem por carteira) e `MessageDeduplicationId` = `eventId`. Consumidores devem deduplicar por `eventId` (entrega pelo menos uma vez), desviar por `eventType` e `version`, e podem usar `walletVersion` para descartar um saldo mais antigo que o já visto.
 
 ## Schema e imutabilidade
 
@@ -124,6 +179,20 @@ Cada invariante financeira tem uma constraint, um índice único parcial ou um t
 | indisponibilidade transitória, conflito esgotado, timeout | 503 + `Retry-After` | `SERVICE_UNAVAILABLE` |
 | bug ou violação de invariante | 500 | `INTERNAL_ERROR` (detalhe só no log) |
 
+Corpos de resposta de `POST /wagering/transactions`:
+
+```text
+201 {"transactionId":"…","status":"PROCESSED","balance":{"amount":"975.00","currency":"BRL"},"idempotentReplay":false}
+200 {"transactionId":"…","status":"PROCESSED","balance":{"amount":"975.00","currency":"BRL"},"idempotentReplay":true}
+202 {"transactionId":"…","status":"PENDING_REFERENCE","idempotentReplay":false}      + Location: /wagering/transactions/…
+422 {"transactionId":"…","status":"REJECTED","failureCode":"INSUFFICIENT_FUNDS","idempotentReplay":false}
+400 {"type":"about:blank","title":"Bad Request","status":400,"detail":"…","code":"INVALID_MONEY","correlationId":"…"}
+409 {"type":"about:blank","title":"Conflict","status":409,"detail":"…","code":"IDEMPOTENCY_KEY_REUSED","correlationId":"…"}
+503 {"type":"about:blank","title":"Service Unavailable","status":503,"detail":"…","code":"SERVICE_UNAVAILABLE","correlationId":"…"}  + Retry-After: 1
+```
+
+Os resultados de uma operação (processada, pendente, rejeitada) usam o corpo da transação, e o replay devolve o mesmo corpo com `idempotentReplay: true`. Os erros de requisição usam `application/problem+json`. Uma rejeição de negócio não traz saldo: não houve movimentação.
+
 - Cada requisição de negócio tem `HTTP_REQUEST_TIMEOUT` (10 s, menor que o write timeout); o prazo chega ao banco pelo context.
 - O access log registra método, rota, status, duração, correlation id, request id, client e provedor, nunca corpos ou headers.
 - O ledger é paginado com cursor opaco (`base64url` de JSON com o último `seq`), estável enquanto novos lançamentos chegam.
@@ -137,7 +206,7 @@ Cada invariante financeira tem uma constraint, um índice único parcial ou um t
 - Entrega pelo menos uma vez. Se o processo morrer entre o envio e a marcação, o lease expira e outra réplica reenvia o mesmo `eventId`; a deduplicação do SQS absorve reenvios dentro da janela, e os consumidores devem deduplicar por `eventId`. A ordem por carteira é a ordem de `occurred_at` no caminho normal; após uma falha, um evento pode chegar depois de um mais novo, e `walletVersion` permite detectar isso.
 - O dono do lease é `INSTANCE_ID` mais um sufixo aleatório por processo, para que uma réplica reiniciada não feche linhas reivindicadas pela encarnação anterior. No shutdown o loop é cancelado antes do pool fechar.
 - Métricas: `outbox_events_published_total`, `outbox_publish_failures_total` e `outbox_lag_seconds` (idade do evento mais antigo não publicado).
-- Testes de integração com PostgreSQL e LocalStack reais: publicação dos eventos commitados (grupo e deduplicação corretos), dois publicadores concorrentes enviando cada evento exatamente uma vez, broker fora do ar (nada perdido, reagendado e publicado na volta) e lease expirado retomado por outro publicador.
+- Testes de integração com PostgreSQL e LocalStack reais: publicação dos eventos commitados (grupo e deduplicação corretos), dois publicadores concorrentes enviando cada evento exatamente uma vez, broker fora do ar (nada perdido, reagendado e publicado na volta), lease expirado retomado por outro publicador (crash entre o commit e o envio) e crash entre o envio e a marcação (reenvio com o mesmo `eventId`, deduplicado pelo SQS).
 
 ## Consumidor SQS e inbox
 
@@ -152,7 +221,7 @@ Cada invariante financeira tem uma constraint, um índice único parcial ou um t
 - Limites: visibility timeout de 60 s na fila e 10 s por mensagem no processamento, então uma mensagem nunca é reentregue enquanto ainda está sendo tratada.
 - `SIGTERM`: para de buscar mensagens, conclui as que estão em andamento (sem cancelá-las) e libera a visibilidade das que ainda não começaram. O long poll em andamento não é cancelado: o broker ainda poderia entregar mensagens a uma requisição abandonada, e elas ficariam invisíveis até o visibility timeout. Ele termina em até 5 s, e o que chegar depois do início do shutdown é liberado na hora. Os testes e2e encontraram esse caso: uma mensagem enviada logo após um restart ficava parada 60 s.
 - Produtores: `MessageGroupId` = `walletId` (ordem por carteira) e `MessageDeduplicationId` = `messageId`; a deduplicação do SQS cobre 5 minutos, e a inbox cobre o resto.
-- Testes de integração com LocalStack e PostgreSQL: processamento e remoção, reentrega com um único efeito, rejeição de negócio removida sem DLQ, mensagens malformadas na DLQ sem nenhuma transação criada, falha transitória persistente levada à DLQ pelo redrive, e um consumidor que morre depois do commit e antes da remoção (a mensagem volta e é concluída como replay, com um débito só); no nível do caso de uso, `messageId` reutilizado, HTTP seguido de SQS e referência pendente.
+- Testes de integração com LocalStack e PostgreSQL: processamento e remoção, reentrega com um único efeito, rejeição de negócio removida sem DLQ, mensagens malformadas na DLQ sem nenhuma transação criada, falha transitória persistente levada à DLQ pelo redrive, e um consumidor que morre depois do commit e antes da remoção (a mensagem volta e é concluída como replay, com um débito só); no nível do caso de uso, `messageId` reutilizado, HTTP seguido de SQS, HTTP e SQS ao mesmo tempo (20 entregas, um efeito) e referência pendente.
 
 ## Uso do Fx
 
