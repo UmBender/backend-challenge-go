@@ -7,6 +7,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"go.uber.org/fx"
+
+	"github.com/UmBender/backend-challenge-go/internal/app"
 )
 
 var Module = fx.Module("metrics",
@@ -14,6 +16,8 @@ var Module = fx.Module("metrics",
 		NewRegistry,
 		func(r *prometheus.Registry) prometheus.Registerer { return r },
 		func(r *prometheus.Registry) prometheus.Gatherer { return r },
+		NewAppMetrics,
+		func(m *AppMetrics) app.Metrics { return m },
 	),
 )
 

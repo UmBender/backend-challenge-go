@@ -8,6 +8,7 @@ import (
 	"github.com/UmBender/backend-challenge-go/internal/adapters/httpapi"
 	"github.com/UmBender/backend-challenge-go/internal/adapters/postgres"
 	"github.com/UmBender/backend-challenge-go/internal/adapters/sqsclient"
+	"github.com/UmBender/backend-challenge-go/internal/app"
 	"github.com/UmBender/backend-challenge-go/internal/platform/config"
 	"github.com/UmBender/backend-challenge-go/internal/platform/health"
 	"github.com/UmBender/backend-challenge-go/internal/platform/logging"
@@ -24,8 +25,24 @@ func Modules() fx.Option {
 		postgres.Module,
 		sqsclient.Module,
 		httpapi.Module,
+		appModule,
 	)
 }
+
+// appModule lives here so the application layer stays free of Fx.
+var appModule = fx.Module("app",
+	fx.Provide(
+		func() app.Clock { return app.SystemClock{} },
+		func() app.IDs { return app.UUIDv7{} },
+		func(p config.Pending) app.PendingPolicy {
+			return app.PendingPolicy{TTL: p.TTL, MaxAttempts: p.MaxAttempts, BackoffBase: p.BackoffBase, BackoffCap: p.BackoffCap}
+		},
+		app.NewOpenWallet,
+		app.NewSubmitWager,
+		app.NewQueries,
+		app.NewReconcile,
+	),
+)
 
 // App is the production application: the graph plus logging and the start
 // and stop budgets from configuration.

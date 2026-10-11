@@ -1,6 +1,5 @@
-// Package postgres owns the PostgreSQL connection pool. Repositories and the
-// transaction manager arrive in later tasks; T0 only opens, checks and closes
-// the pool.
+// Package postgres is the persistence adapter: pool, transaction manager,
+// repositories and the mapping of SQLSTATEs to application errors.
 package postgres
 
 import (
@@ -12,15 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"github.com/UmBender/backend-challenge-go/internal/app"
 	"github.com/UmBender/backend-challenge-go/internal/platform/config"
 	"github.com/UmBender/backend-challenge-go/internal/platform/health"
 )
 
-// Module provides *pgxpool.Pool and registers PostgreSQL as a readiness check.
+// Module provides *pgxpool.Pool, app.TxManager and the readiness check.
 var Module = fx.Module("postgres",
 	fx.Provide(
 		NewPool,
 		health.AsCheck(NewCheck),
+		fx.Annotate(NewTxManager, fx.As(new(app.TxManager))),
 	),
 )
 
@@ -37,6 +38,11 @@ func NewPool(lc fx.Lifecycle, db config.Database, cfg config.Config, log *slog.L
 	pcfg.MaxConns = db.MaxConns
 	// Identifies each replica in pg_stat_activity.
 	pcfg.ConnConfig.RuntimeParams["application_name"] = "wallet-" + cfg.InstanceID
+	// Bounded waits: a transaction stuck behind a wallet lock (55P03) or a
+	// runaway statement (57014) becomes ErrUnavailable instead of holding a
+	// connection. 15 s stays under the HTTP write timeout.
+	pcfg.ConnConfig.RuntimeParams["lock_timeout"] = "5s"
+	pcfg.ConnConfig.RuntimeParams["statement_timeout"] = "15s"
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), pcfg)
 	if err != nil {

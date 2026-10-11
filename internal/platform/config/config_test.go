@@ -116,3 +116,42 @@ func TestLoadNeverLeaksTheDatabasePassword(t *testing.T) {
 		t.Fatalf("error must exist and must not contain the password: %v", err)
 	}
 }
+
+func TestLoadPendingPolicy(t *testing.T) {
+	cfg, err := Load(env(minimal()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Pending{TTL: 15 * time.Minute, MaxAttempts: 10, BackoffBase: time.Second, BackoffCap: 2 * time.Minute}
+	if cfg.Pending != want {
+		t.Fatalf("defaults = %+v, want %+v", cfg.Pending, want)
+	}
+	values := minimal()
+	values["PENDING_REFERENCE_TTL"] = "2s"
+	values["PENDING_MAX_ATTEMPTS"] = "3"
+	values["PENDING_BACKOFF_BASE"] = "100ms"
+	values["PENDING_BACKOFF_CAP"] = "1s"
+	cfg, err = Load(env(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Pending != (Pending{TTL: 2 * time.Second, MaxAttempts: 3, BackoffBase: 100 * time.Millisecond, BackoffCap: time.Second}) {
+		t.Fatalf("overrides = %+v", cfg.Pending)
+	}
+}
+
+func TestLoadRejectsInvalidPendingPolicy(t *testing.T) {
+	for name, tt := range map[string]struct {
+		change  func(map[string]string)
+		wantErr string
+	}{
+		"zero attempts": {func(v map[string]string) { v["PENDING_MAX_ATTEMPTS"] = "0" }, "PENDING_MAX_ATTEMPTS must be at least 1"},
+		"base over cap": {func(v map[string]string) { v["PENDING_BACKOFF_BASE"] = "5m" }, "PENDING_BACKOFF_BASE must not exceed PENDING_BACKOFF_CAP"},
+	} {
+		values := minimal()
+		tt.change(values)
+		if _, err := Load(env(values)); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			t.Errorf("%s: err = %v, want %q", name, err, tt.wantErr)
+		}
+	}
+}

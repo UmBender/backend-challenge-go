@@ -22,6 +22,7 @@ type Config struct {
 	Database Database
 	AWS      AWS
 	SQS      SQS
+	Pending  Pending
 }
 
 type HTTP struct {
@@ -53,6 +54,15 @@ type SQS struct {
 	WagerQueueName  string
 	DLQName         string
 	EventsQueueName string
+}
+
+// Pending schedules operations waiting for a reference (§7): retried with
+// backoff until TTL or MaxAttempts, then rejected with REFERENCE_NOT_FOUND.
+type Pending struct {
+	TTL         time.Duration
+	MaxAttempts int
+	BackoffBase time.Duration
+	BackoffCap  time.Duration
 }
 
 type LookupFunc func(key string) (string, bool)
@@ -94,6 +104,12 @@ func Load(lookup LookupFunc) (Config, error) {
 			DLQName:         r.str("SQS_DLQ_NAME", "wager-transactions-dlq.fifo"),
 			EventsQueueName: r.str("SQS_EVENTS_QUEUE_NAME", "wallet-events.fifo"),
 		},
+		Pending: Pending{
+			TTL:         r.duration("PENDING_REFERENCE_TTL", 15*time.Minute),
+			MaxAttempts: int(r.int32("PENDING_MAX_ATTEMPTS", 10)),
+			BackoffBase: r.duration("PENDING_BACKOFF_BASE", time.Second),
+			BackoffCap:  r.duration("PENDING_BACKOFF_CAP", 2*time.Minute),
+		},
 	}
 
 	r.check(cfg.InstanceID != "", "INSTANCE_ID must not be empty (hostname unavailable)")
@@ -116,6 +132,9 @@ func Load(lookup LookupFunc) (Config, error) {
 	} {
 		r.check(strings.HasSuffix(name, ".fifo"), key+" must name a FIFO queue (suffix .fifo)")
 	}
+	r.check(cfg.Pending.MaxAttempts >= 1, "PENDING_MAX_ATTEMPTS must be at least 1")
+	r.check(cfg.Pending.BackoffBase <= cfg.Pending.BackoffCap,
+		"PENDING_BACKOFF_BASE must not exceed PENDING_BACKOFF_CAP")
 	r.check(cfg.HTTP.ShutdownTimeout < cfg.StopTimeout,
 		"HTTP_SHUTDOWN_TIMEOUT must be shorter than SHUTDOWN_TIMEOUT so the HTTP drain fits in the stop budget")
 
