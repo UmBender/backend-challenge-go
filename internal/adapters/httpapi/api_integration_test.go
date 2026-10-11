@@ -40,12 +40,17 @@ type server struct {
 // newServer runs the real router and use cases against a fresh database.
 func newServer(t *testing.T) *server {
 	t.Helper()
+	return newServerWith(t, headerAuth{"provider-a": providerA, "provider-b": providerB, "internal": internal})
+}
+
+func newServerWith(t *testing.T, auth Authenticator) *server {
+	t.Helper()
 	db := pgtest.New(t)
 	tx := postgres.NewTxManager(db.Pool(t, pgtest.App))
 	clock, ids := app.SystemClock{}, app.UUIDv7{}
 	q := app.NewQueries(tx)
 	api := &API{
-		Auth:           headerAuth{"provider-a": providerA, "provider-b": providerB, "internal": internal},
+		Auth:           auth,
 		Log:            discard,
 		RequestTimeout: 5 * time.Second,
 		Submit:         app.NewSubmitWager(tx, clock, ids, app.PendingPolicy{TTL: time.Minute, MaxAttempts: 5, BackoffBase: time.Second, BackoffCap: time.Minute}),
