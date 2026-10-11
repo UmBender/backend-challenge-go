@@ -3,7 +3,7 @@ MIGRATE  = $(COMPOSE) run --rm migrate -path=/migrations \
 	-database=postgres://wallet_owner:$${WALLET_OWNER_PASSWORD:-wallet_owner}@postgres:5432/wallet?sslmode=disable
 
 .PHONY: help up down down-volumes ps logs migrate-up migrate-down migrate-version \
-	fmt fmt-check vet test test-race test-integration test-e2e check
+	fmt fmt-check vet test test-race test-integration test-e2e test-load check
 
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-18s %s\n", $$1, $$2}'
@@ -54,5 +54,8 @@ test-integration: ## Integration tests; needs the infra running. Unset variables
 
 test-e2e: ## Black-box scenarios against the three replicas; needs `docker compose up --build`
 	./scripts/with-env-defaults.sh go test -tags=e2e -count=1 -v ./tests/e2e/
+
+test-load: ## Load test against the three replicas (60 s); needs `docker compose up --build`
+	./scripts/with-env-defaults.sh go run ./cmd/loadtest -duration 60s -workers 32
 
 check: fmt-check vet test-race ## Everything that runs without Docker
