@@ -56,6 +56,8 @@ func (a *API) submit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, a.Log, err)
 		return
 	}
+	a.Log.InfoContext(ctx, "wager submitted", "correlationId", correlation, "transactionId", res.Transaction.ID(),
+		"walletId", req.WalletID, "providerId", req.ProviderID, "status", res.Transaction.Status(), "replay", res.Replay)
 	tx := res.Transaction
 	body := submitResponse{TransactionID: tx.ID(), Status: tx.Status(), IdempotentReplay: res.Replay}
 	var status int

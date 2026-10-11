@@ -26,6 +26,15 @@ const (
 	messageType  = "WagerTransactionRequested"
 )
 
+// ConsumerMetrics counts settled messages by outcome: processed, dlq, retry.
+type ConsumerMetrics interface {
+	SQSMessage(outcome string)
+}
+
+type nopConsumerMetrics struct{}
+
+func (nopConsumerMetrics) SQSMessage(string) {}
+
 // Submitter is app.SubmitWager, the use case shared with HTTP.
 type Submitter interface {
 	Execute(ctx context.Context, cmd app.SubmitCommand) (app.SubmitResult, error)
@@ -54,11 +63,17 @@ type Consumer struct {
 	log      *slog.Logger
 	cfg      ConsumerConfig
 	inputURL func() string
+	metrics  ConsumerMetrics
 }
 
 func NewConsumer(client *sqs.Client, queues *Queues, submit Submitter, log *slog.Logger, cfg ConsumerConfig) *Consumer {
 	return &Consumer{client: client, queues: queues, submit: submit, log: log.With("component", "sqs-consumer"), cfg: cfg,
-		inputURL: func() string { return queues.WagerURL }}
+		inputURL: func() string { return queues.WagerURL }, metrics: nopConsumerMetrics{}}
+}
+
+func (c *Consumer) WithMetrics(m ConsumerMetrics) *Consumer {
+	c.metrics = m
+	return c
 }
 
 // Run polls until ctx is cancelled, then waits for the messages in progress.
@@ -122,15 +137,20 @@ func (c *Consumer) handle(base context.Context, m types.Message) bool {
 		res, err = c.submit.Execute(ctx, cmd)
 		if err == nil {
 			c.log.InfoContext(ctx, "message processed", "messageId", cmd.Inbox.MessageID,
-				"transactionId", res.Transaction.ID(), "status", res.Transaction.Status(), "replay", res.Replay)
+				"correlationId", cmd.CorrelationID, "transactionId", res.Transaction.ID(),
+				"walletId", cmd.Request.WalletID, "providerId", cmd.Request.ProviderID,
+				"status", res.Transaction.Status(), "replay", res.Replay)
+			c.metrics.SQSMessage("processed")
 			return c.delete(ctx, m)
 		}
 	}
 	if permanent(err) {
 		c.log.WarnContext(ctx, "message rejected permanently, forwarding to the DLQ", "sqsMessageId", aws.ToString(m.MessageId), "err", err)
+		c.metrics.SQSMessage("dlq")
 		return c.toDLQ(ctx, m, err)
 	}
 	c.log.WarnContext(ctx, "message failed transiently", "sqsMessageId", aws.ToString(m.MessageId), "receiveCount", receiveCount(m), "err", err)
+	c.metrics.SQSMessage("retry")
 	c.retryLater([]types.Message{m}, receiveCount(m))
 	return false
 }

@@ -44,11 +44,15 @@ var appModule = fx.Module("app",
 			return app.PendingPolicy{TTL: p.TTL, MaxAttempts: p.MaxAttempts, BackoffBase: p.BackoffBase, BackoffCap: p.BackoffCap}
 		},
 		app.NewOpenWallet,
-		app.NewSubmitWager,
+		func(tx app.TxManager, c app.Clock, ids app.IDs, p app.PendingPolicy, m app.WagerMetrics) *app.SubmitWager {
+			return app.NewSubmitWager(tx, c, ids, p).WithMetrics(m)
+		},
 		app.NewQueries,
 		app.NewReconcile,
 		newOutboxRelay,
-		app.NewPendingWorker,
+		func(tx app.TxManager, c app.Clock, ids app.IDs, p app.PendingPolicy, log *slog.Logger, m app.WagerMetrics) *app.PendingWorker {
+			return app.NewPendingWorker(tx, c, ids, p, log).WithMetrics(m)
+		},
 		newConsumer,
 	),
 	fx.Invoke(
@@ -77,14 +81,14 @@ func newOutboxRelay(store app.OutboxStore, sender app.EventSender, clock app.Clo
 // The queue's visibility timeout (60 s) is far above ProcessTimeout, so a
 // message is never redelivered while it is still being handled, and the
 // in-flight wait on shutdown fits in the stop budget.
-func newConsumer(client *sqs.Client, queues *sqsclient.Queues, submit *app.SubmitWager, log *slog.Logger) *sqsclient.Consumer {
+func newConsumer(client *sqs.Client, queues *sqsclient.Queues, submit *app.SubmitWager, log *slog.Logger, m *metrics.AppMetrics) *sqsclient.Consumer {
 	return sqsclient.NewConsumer(client, queues, submit, log, sqsclient.ConsumerConfig{
 		Concurrency:    4,
 		WaitTime:       20,
 		ProcessTimeout: 10 * time.Second,
 		RetryBase:      2 * time.Second,
 		RetryCap:       30 * time.Second,
-	})
+	}).WithMetrics(m)
 }
 
 // runInBackground runs a worker loop after its dependencies started and

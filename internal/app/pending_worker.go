@@ -13,16 +13,23 @@ import (
 // its BET, for example). The state lives in the row, so any replica resumes
 // work started by another, including one that crashed.
 type PendingWorker struct {
-	tx     TxManager
-	clock  Clock
-	ids    IDs
-	policy PendingPolicy
-	log    *slog.Logger
-	poll   time.Duration
+	tx      TxManager
+	clock   Clock
+	ids     IDs
+	policy  PendingPolicy
+	log     *slog.Logger
+	poll    time.Duration
+	metrics WagerMetrics
 }
 
 func NewPendingWorker(tx TxManager, clock Clock, ids IDs, policy PendingPolicy, log *slog.Logger) *PendingWorker {
-	return &PendingWorker{tx: tx, clock: clock, ids: ids, policy: policy, log: log.With("component", "pending-worker"), poll: time.Second}
+	return &PendingWorker{tx: tx, clock: clock, ids: ids, policy: policy, log: log.With("component", "pending-worker"),
+		poll: time.Second, metrics: NopWagerMetrics{}}
+}
+
+func (u *PendingWorker) WithMetrics(m WagerMetrics) *PendingWorker {
+	u.metrics = m
+	return u
 }
 
 // RunOnce resolves at most one due row and reports whether it found one.
@@ -59,9 +66,19 @@ func (u *PendingWorker) RunOnce(ctx context.Context) (bool, error) {
 		}
 		return persistDecision(ctx, r, u.ids, tx, w, version, d, tx.IdempotencyKey(), "pending-worker", now)
 	})
+	if claimed != nil && err == nil {
+		if claimed.Status() == wager.StatusPendingReference {
+			u.metrics.PendingRetry()
+		} else {
+			u.metrics.WagerResult("worker", string(claimed.Status()), false, u.clock.Now().Sub(now))
+			u.log.InfoContext(ctx, "pending operation resolved", "transactionId", claimed.ID(),
+				"walletId", claimed.WalletID(), "providerId", claimed.ProviderID(), "status", claimed.Status())
+		}
+	}
 	if err == nil || claimed == nil || transient(ctx, err) {
 		return claimed != nil, err
 	}
+	u.metrics.WagerResult("worker", string(wager.StatusFailed), false, u.clock.Now().Sub(now))
 	// A permanent failure would otherwise be retried forever: record it as
 	// FAILED (PROCESSING_FAILED) for audit, in a separate transaction.
 	u.log.ErrorContext(ctx, "pending operation failed permanently", "transactionId", claimed.ID(), "err", err)

@@ -44,14 +44,20 @@ type PendingPolicy struct {
 
 // SubmitWager is the single use case behind HTTP, SQS and the pending worker.
 type SubmitWager struct {
-	tx     TxManager
-	clock  Clock
-	ids    IDs
-	policy PendingPolicy
+	tx      TxManager
+	clock   Clock
+	ids     IDs
+	policy  PendingPolicy
+	metrics WagerMetrics
 }
 
 func NewSubmitWager(tx TxManager, clock Clock, ids IDs, policy PendingPolicy) *SubmitWager {
-	return &SubmitWager{tx: tx, clock: clock, ids: ids, policy: policy}
+	return &SubmitWager{tx: tx, clock: clock, ids: ids, policy: policy, metrics: NopWagerMetrics{}}
+}
+
+func (u *SubmitWager) WithMetrics(m WagerMetrics) *SubmitWager {
+	u.metrics = m
+	return u
 }
 
 // Under the wallet lock conflicts should not happen; this bounds retries of
@@ -69,7 +75,15 @@ const conflictRetries = 3
 //
 // The lock order is always index entry, then one wallet row, so the flow
 // cannot deadlock. Nothing is committed as PENDING on this path.
-func (u *SubmitWager) Execute(ctx context.Context, cmd SubmitCommand) (SubmitResult, error) {
+func (u *SubmitWager) Execute(ctx context.Context, cmd SubmitCommand) (res SubmitResult, err error) {
+	start := time.Now()
+	defer func() {
+		origin := "http"
+		if cmd.Inbox != nil {
+			origin = "sqs"
+		}
+		u.metrics.WagerResult(origin, resultLabel(res.Transaction, err), res.Replay, time.Since(start))
+	}()
 	// An invalid request is a 400 and never reaches the database.
 	if err := cmd.Request.Validate(); err != nil {
 		return SubmitResult{}, err
@@ -93,6 +107,7 @@ func (u *SubmitWager) Execute(ctx context.Context, cmd SubmitCommand) (SubmitRes
 			return res, err
 		}
 		// Retry the whole transaction, never a statement of an aborted one.
+		u.metrics.ConcurrencyConflict()
 		select {
 		case <-time.After(Backoff(attempt, 10*time.Millisecond, 100*time.Millisecond)):
 		case <-ctx.Done():

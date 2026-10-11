@@ -19,6 +19,7 @@ var Module = fx.Module("metrics",
 		NewAppMetrics,
 		func(m *AppMetrics) app.Metrics { return m },
 		func(m *AppMetrics) app.OutboxMetrics { return m },
+		func(m *AppMetrics) app.WagerMetrics { return m },
 	),
 )
 
