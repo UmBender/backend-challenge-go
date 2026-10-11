@@ -48,7 +48,7 @@ test: ## Unit tests (no Docker needed)
 test-race: ## Unit tests with the race detector
 	go test -race ./...
 
-test-integration: ## Integration tests; needs `make up` (or the infra services) running
-	go test -tags=integration -race -count=1 ./...
+test-integration: ## Integration tests; needs the infra running. Unset variables come from .env.example
+	./scripts/with-env-defaults.sh go test -tags=integration -race -count=1 ./...
 
 check: fmt-check vet test-race ## Everything that runs without Docker

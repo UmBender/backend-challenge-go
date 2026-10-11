@@ -137,12 +137,11 @@ go vet ./...
 make check             # gofmt + vet + testes com -race
 ```
 
-Integração (build tag `integration`), com a infraestrutura no ar e as variáveis exportadas no mesmo shell:
+Integração (build tag `integration`), com a infraestrutura no ar:
 
 ```sh
 docker compose up -d postgres localstack keycloak migrate
-set -a; . ./.env.example; set +a
-make test-integration  # go test -tags=integration -race -count=1 ./...
+make test-integration  # variáveis não definidas no ambiente vêm do .env.example
 ```
 
 Os testes de banco criam um banco isolado por teste com o superusuário de `TEST_ADMIN_DATABASE_URL`, aplicam as migrations como `wallet_owner` e testam como `wallet_app`. Nunca tocam o banco `wallet` das réplicas.
@@ -151,5 +150,5 @@ Os testes de banco criam um banco isolado por teste com o superusuário de `TEST
 
 - **`Permission denied` em `/docker-entrypoint-initdb.d` (SELinux):** os bind mounts usam `:z`; mantenha o sufixo.
 - **Mudança no initdb sem efeito:** ele só roda num volume novo — `make down-volumes`.
-- **`DATABASE_URL is not set` nos testes de integração:** faltou o `set -a; . ./.env.example; set +a`.
+- **`... is not set` ao rodar `go test -tags=integration` direto:** use `make test-integration`, ou exporte as variáveis com `set -a; . ./.env.example; set +a`. Valores exportados antigos têm prioridade; se o seu `.env` é de uma versão anterior, copie de novo o `.env.example`.
 - **Porta ocupada:** ajuste `POSTGRES_HOST_PORT`, `LOCALSTACK_HOST_PORT` ou `KEYCLOAK_HOST_PORT` no `.env`.
