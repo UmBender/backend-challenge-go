@@ -70,6 +70,9 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       KC_HEALTH_ENABLED: "true"
+      # Fixed issuer: tokens carry iss=http://localhost:8180/realms/wagering
+      # whether they are requested from the host or from inside the network.
+      KC_HOSTNAME: http://localhost:${KEYCLOAK_HOST_PORT:-8180}
     volumes:
       - ./deploy/keycloak/realm-wagering.json:/opt/keycloak/data/import/realm-wagering.json:ro,z
     ports:
