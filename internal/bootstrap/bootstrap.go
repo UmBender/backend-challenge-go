@@ -3,6 +3,11 @@
 package bootstrap
 
 import (
+	"context"
+	"log/slog"
+	"time"
+
+	"github.com/google/uuid"
 	"go.uber.org/fx"
 
 	"github.com/UmBender/backend-challenge-go/internal/adapters/httpapi"
@@ -41,8 +46,52 @@ var appModule = fx.Module("app",
 		app.NewSubmitWager,
 		app.NewQueries,
 		app.NewReconcile,
+		newOutboxRelay,
 	),
+	fx.Invoke(runOutboxRelay),
 )
+
+// Conservative fixed values: a lease far above one SQS send, small batches,
+// and a retry cap that keeps retrying forever without hammering the broker.
+func newOutboxRelay(store app.OutboxStore, sender app.EventSender, clock app.Clock, m app.OutboxMetrics,
+	log *slog.Logger, cfg config.Config) *app.OutboxRelay {
+	return app.NewOutboxRelay(store, sender, clock, m, log, app.OutboxRelayConfig{
+		// Unique per process, so a restarted replica never settles rows
+		// leased by its previous incarnation.
+		Owner:        cfg.InstanceID + "-" + uuid.NewString()[:8],
+		BatchSize:    50,
+		Lease:        30 * time.Second,
+		PollInterval: 500 * time.Millisecond,
+		BackoffBase:  time.Second,
+		BackoffCap:   time.Minute,
+	})
+}
+
+// runOutboxRelay starts after the pool and the queues (its dependencies) and
+// stops before them. Stopping cancels the loop; an event sent but not yet
+// marked is sent again later with the same eventId.
+func runOutboxRelay(lc fx.Lifecycle, relay *app.OutboxRelay) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	lc.Append(fx.Hook{
+		OnStart: func(context.Context) error {
+			go func() {
+				defer close(done)
+				relay.Run(ctx)
+			}()
+			return nil
+		},
+		OnStop: func(stopCtx context.Context) error {
+			cancel()
+			select {
+			case <-done:
+				return nil
+			case <-stopCtx.Done():
+				return stopCtx.Err()
+			}
+		},
+	})
+}
 
 // App is the production application: the graph plus logging and the start
 // and stop budgets from configuration.

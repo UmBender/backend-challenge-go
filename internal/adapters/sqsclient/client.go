@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"go.uber.org/fx"
 
+	"github.com/UmBender/backend-challenge-go/internal/app"
 	"github.com/UmBender/backend-challenge-go/internal/platform/config"
 	"github.com/UmBender/backend-challenge-go/internal/platform/health"
 )
@@ -22,6 +23,7 @@ var Module = fx.Module("sqs",
 	fx.Provide(
 		NewClient,
 		NewQueues,
+		fx.Annotate(NewEventSender, fx.As(new(app.EventSender))),
 		health.AsCheck(NewCheck),
 	),
 )

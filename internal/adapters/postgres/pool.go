@@ -22,6 +22,7 @@ var Module = fx.Module("postgres",
 		NewPool,
 		health.AsCheck(NewCheck),
 		fx.Annotate(NewTxManager, fx.As(new(app.TxManager))),
+		fx.Annotate(NewOutboxStore, fx.As(new(app.OutboxStore))),
 	),
 )
 

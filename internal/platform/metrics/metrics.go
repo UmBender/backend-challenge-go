@@ -18,6 +18,7 @@ var Module = fx.Module("metrics",
 		func(r *prometheus.Registry) prometheus.Gatherer { return r },
 		NewAppMetrics,
 		func(m *AppMetrics) app.Metrics { return m },
+		func(m *AppMetrics) app.OutboxMetrics { return m },
 	),
 )
 
